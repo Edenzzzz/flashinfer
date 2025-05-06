@@ -579,8 +579,7 @@ class PODWithPagedKVCacheWrapper:
             window_left_d != -1,  # use_sliding_window
             logits_soft_cap_d > 0,  # use_logits_soft_cap
         )
-        print(f"v_p.shape: {v_p.shape}")
-        print(f"v_cache_d.shape: {v_cache_d.shape}")
+
         module_getter.run_tensor(
             # Prefill params
             q_p,
