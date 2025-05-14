@@ -1,8 +1,12 @@
+import logging
+
 import numpy as np
 import torch
 from triton.testing import do_bench
 
 import flashinfer
+
+logging.disable(logging.WARNING)
 
 
 def run_bench(
@@ -76,7 +80,7 @@ def run_bench(
     )
     ms_old = do_bench(lambda: wrapper_old.run(q, kv_data))
 
-    if page_block_size == 1:
+    if page_block_size == 1 and len(p_qo_lens) > 0:
         last_page_len_d = (d_seq_lens_blocks - 1) % page_block_size + 1
         wrapper_pod = flashinfer.PODWithPagedKVCacheWrapper(
             workspace_buffer,
@@ -124,7 +128,7 @@ def run_bench(
 
     print(f"Elapsed time (old scheduler): {ms_old:.2f} ms")
     print(f"Elapsed time (mixed scheduler): {ms:.2f} ms")
-    if page_block_size == 1:
+    if page_block_size == 1 and len(p_qo_lens) > 0:
         print(f"Elapsed time (POD Attention): {ms_pod:.2f} ms")
     total_bytes = (
         q.numel() * q.element_size() + kv_data.numel() * kv_data.element_size()
@@ -136,7 +140,7 @@ def run_bench(
 
     print(f"Memory bandwidth (old scheduler): {bandwidth_old_gb_s:.2f} GB/s")
     print(f"Memory bandwidth (mixed scheduler): {bandwidth_mixed_gb_s:.2f} GB/s")
-    if page_block_size == 1:
+    if page_block_size == 1 and len(p_qo_lens) > 0:
         bandwidth_pod_gb_s = total_bytes / (ms_pod * 1e-3) / (1024**3)
         print(f"Memory bandwidth (POD Attention): {bandwidth_pod_gb_s:.2f} GB/s")
     print()
@@ -156,8 +160,8 @@ if __name__ == "__main__":
     # POD Attention
     d_q_len_configs = [[1] * 122, [1] * 128, [1] * 242, [1] * 256]
     d_kv_len_configs = [[600] * 122, [10000] * 128, [400] * 242, [8192] * 256]
-    p_q_configs = [[17] * 8, [], [17] * 16, []]
-    p_kv_configs = [[10000] * 8, [], [8192] * 16, []]
+    p_q_configs = [[17] * 1, [], [17] * 1, []]
+    p_kv_configs = [[10000] * 1, [], [8192] * 1, []]
 
     # construct random length testcases
     for _ in range(1):
