@@ -2,6 +2,8 @@ import logging
 
 logging.disable(logging.WARNING)
 
+import argparse
+
 import numpy as np
 import torch
 from triton.testing import do_bench
@@ -20,6 +22,7 @@ def run_bench(
     head_dim=128,
     device=0,
     causal=True,
+    profile=False,
 ):
     seq_lens = torch.tensor(d_kv_lens + p_kv_lens, dtype=torch.int32)
     d_seq_lens = torch.tensor(d_kv_lens, dtype=torch.int32)
@@ -78,7 +81,10 @@ def run_bench(
         q_data_type=torch.bfloat16,
         kv_data_type=torch.bfloat16,
     )
-    ms_old = do_bench(lambda: wrapper_old.run(q, kv_data))
+    if profile:
+        wrapper_old.run(q, kv_data)
+    else:
+        ms_old = do_bench(lambda: wrapper_old.run(q, kv_data))
 
     if page_block_size == 1 and len(p_qo_lens) > 0:
         last_page_len_d = (d_seq_lens_blocks - 1) % page_block_size + 1
@@ -87,7 +93,7 @@ def run_bench(
             kv_layout=kv_layout,
         )
         kv_indices_d = torch.arange(
-            0, d_kv_indptr[-1], device="cuda:0", dtype=torch.int32
+            0, d_kv_indptr[-1], device=device, dtype=torch.int32
         )
         wrapper_pod.plan(
             d_kv_indptr.to(device),
@@ -100,8 +106,8 @@ def run_bench(
             q_data_type=torch.bfloat16,
             kv_data_type=torch.bfloat16,
         )
-        ms_pod = do_bench(
-            lambda: wrapper_pod.run(
+        if profile:
+            wrapper_pod.run(
                 q_p,
                 k_p,
                 v_p,
@@ -109,8 +115,19 @@ def run_bench(
                 kv_d,
                 causal_p=causal,
                 causal_d=causal,
-            ),
-        )
+            )
+        else:
+            ms_pod = do_bench(
+                lambda: wrapper_pod.run(
+                    q_p,
+                    k_p,
+                    v_p,
+                    q_d,
+                    kv_d,
+                    causal_p=causal,
+                    causal_d=causal,
+                )
+            )
 
     wrapper = flashinfer.BatchAttention(kv_layout=kv_layout)
     wrapper.plan(
@@ -127,100 +144,109 @@ def run_bench(
         q_data_type=torch.bfloat16,
         kv_data_type=torch.bfloat16,
     )
-    ms = do_bench(lambda: wrapper.run(q, kv_data))
+    if profile:
+        wrapper.run(q, kv_data)
+    else:
+        ms = do_bench(lambda: wrapper.run(q, kv_data))
 
-    print(f"Elapsed time (old scheduler): {ms_old:.3f} ms")
-    print(f"Elapsed time (mixed scheduler): {ms:.3f} ms")
-    if page_block_size == 1 and len(p_qo_lens) > 0:
-        print(f"Elapsed time (POD Attention): {ms_pod:.3f} ms")
-    total_bytes = (
-        q.numel() * q.element_size() + kv_data.numel() * kv_data.element_size()
-    )
-    print(f"Loading memory size (MB): {total_bytes / (1024**2):.3f} MB")
+        print(f"Elapsed time (old scheduler): {ms_old:.3f} ms")
+        print(f"Elapsed time (mixed scheduler): {ms:.3f} ms")
+        if page_block_size == 1 and len(p_qo_lens) > 0:
+            print(f"Elapsed time (POD Attention): {ms_pod:.3f} ms")
+        total_bytes = (
+            q.numel() * q.element_size() + kv_data.numel() * kv_data.element_size()
+        )
+        print(f"Loading memory size (MB): {total_bytes / (1024**2):.3f} MB")
 
-    bandwidth_old_gb_s = total_bytes / (ms_old * 1e-3) / (1024**3)
-    bandwidth_mixed_gb_s = total_bytes / (ms * 1e-3) / (1024**3)
+        bandwidth_old_gb_s = total_bytes / (ms_old * 1e-3) / (1024**3)
+        bandwidth_mixed_gb_s = total_bytes / (ms * 1e-3) / (1024**3)
 
-    print(f"Memory bandwidth (old scheduler): {bandwidth_old_gb_s:.3f} GB/s")
-    print(f"Memory bandwidth (mixed scheduler): {bandwidth_mixed_gb_s:.3f} GB/s")
-    if page_block_size == 1 and len(p_qo_lens) > 0:
-        bandwidth_pod_gb_s = total_bytes / (ms_pod * 1e-3) / (1024**3)
-        print(f"Memory bandwidth (POD Attention): {bandwidth_pod_gb_s:.3f} GB/s")
-    print()
+        print(f"Memory bandwidth (old scheduler): {bandwidth_old_gb_s:.3f} GB/s")
+        print(f"Memory bandwidth (mixed scheduler): {bandwidth_mixed_gb_s:.3f} GB/s")
+        if page_block_size == 1 and len(p_qo_lens) > 0:
+            bandwidth_pod_gb_s = total_bytes / (ms_pod * 1e-3) / (1024**3)
+            print(f"Memory bandwidth (POD Attention): {bandwidth_pod_gb_s:.3f} GB/s")
+        print()
 
 
 if __name__ == "__main__":
     np.random.seed(42)
     torch.random.manual_seed(42)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--profile", action="store_true")
+    args = parser.parse_args()
+    if args.profile:
+        d_q_len_configs = [[1] * 122]
+        d_kv_len_configs = [[600] * 122]
+        p_q_configs = [[17] * 1]
+        p_kv_configs = [[10000] * 1]
+    else:
+        # POD Attention
+        d_q_len_configs = [[1] * 122, [1] * 128, [1] * 242, [1] * 256]
+        d_kv_len_configs = [[600] * 122, [10000] * 128, [400] * 242, [8192] * 256]
+        p_q_configs = [[17] * 1, [], [17] * 1, []]
+        p_kv_configs = [[10000] * 1, [], [8192] * 1, []]
 
-    seq_len_configs = [
-        [(600, 1)] * 122 + [(10000, 17)] * 8,
-        [(10000, 1)] * 128,
-        [(400, 1)] * 242 + [(8192, 17)] * 16,
-        [(8192, 1)] * 256,
-    ]
+        # d_q_len_configs = [[1] * 128]
+        # d_kv_len_configs = [[600] * 128]
+        # p_q_configs = [[17] * 1]
+        # p_kv_configs = [[10000] * 1]
 
-    # POD Attention
-    d_q_len_configs = [[1] * 122, [1] * 128, [1] * 242, [1] * 256]
-    d_kv_len_configs = [[600] * 122, [10000] * 128, [400] * 242, [8192] * 256]
-    p_q_configs = [[17] * 1, [], [17] * 1, []]
-    p_kv_configs = [[10000] * 1, [], [8192] * 1, []]
+        # construct random length testcases
+        for _ in range(1):
+            bsz = 256
+            stride = 16
+            sparsity = 0.05
 
-    # construct random length testcases
-    for _ in range(1):
-        bsz = 256
-        stride = 16
-        sparsity = 0.05
+            full_kv_len = np.random.randint(1000, 8192, size=bsz)
+            p_q_lens = []
+            p_kv_lens = []
+            d_q_lens = []
+            d_kv_lens = []
+            for i in range(bsz):
+                if i % stride == 0:
+                    kv_len = full_kv_len[i]
+                    qo_len = stride + 1
+                    p_q_lens.append(qo_len)
+                    p_kv_lens.append(kv_len)
+                else:
+                    kv_len = int(full_kv_len[i] * sparsity)
+                    qo_len = 1
+                    d_q_lens.append(qo_len)
+                    d_kv_lens.append(kv_len)
 
-        full_kv_len = np.random.randint(1000, 8192, size=bsz)
-        p_q_lens = []
-        p_kv_lens = []
-        d_q_lens = []
-        d_kv_lens = []
-        for i in range(bsz):
-            if i % stride == 0:
-                kv_len = full_kv_len[i]
-                qo_len = stride + 1
-                p_q_lens.append(qo_len)
-                p_kv_lens.append(kv_len)
-            else:
-                kv_len = int(full_kv_len[i] * sparsity)
-                qo_len = 1
-                d_q_lens.append(qo_len)
-                d_kv_lens.append(kv_len)
+            p_q_configs.append(p_q_lens)
+            p_kv_configs.append(p_kv_lens)
+            d_q_len_configs.append(d_q_lens)
+            d_kv_len_configs.append(d_kv_lens)
 
-        p_q_configs.append(p_q_lens)
-        p_kv_configs.append(p_kv_lens)
-        d_q_len_configs.append(d_q_lens)
-        d_kv_len_configs.append(d_kv_lens)
+        for _ in range(1):
+            bsz = 128
+            stride = 16
+            sparsity = 0.05
 
-    for _ in range(1):
-        bsz = 128
-        stride = 16
-        sparsity = 0.05
+            full_kv_len = np.random.randint(2000, 16000, size=bsz)
+            p_q_lens = []
+            p_kv_lens = []
+            d_q_len = []
+            d_kv_len = []
 
-        full_kv_len = np.random.randint(2000, 16000, size=bsz)
-        p_q_lens = []
-        p_kv_lens = []
-        d_q_len = []
-        d_kv_len = []
+            for i in range(bsz):
+                if i % stride == 0:
+                    kv_len = full_kv_len[i]
+                    qo_len = stride + 1
+                    p_q_lens.append(qo_len)
+                    p_kv_lens.append(kv_len)
+                else:
+                    kv_len = int(full_kv_len[i] * sparsity)
+                    qo_len = 1
+                    d_q_lens.append(qo_len)
+                    d_kv_lens.append(kv_len)
 
-        for i in range(bsz):
-            if i % stride == 0:
-                kv_len = full_kv_len[i]
-                qo_len = stride + 1
-                p_q_lens.append(qo_len)
-                p_kv_lens.append(kv_len)
-            else:
-                kv_len = int(full_kv_len[i] * sparsity)
-                qo_len = 1
-                d_q_lens.append(qo_len)
-                d_kv_lens.append(kv_len)
-
-        p_q_configs.append(p_q_lens)
-        p_kv_configs.append(p_kv_lens)
-        d_q_len_configs.append(d_q_len)
-        d_kv_len_configs.append(d_kv_len)
+            p_q_configs.append(p_q_lens)
+            p_kv_configs.append(p_kv_lens)
+            d_q_len_configs.append(d_q_len)
+            d_kv_len_configs.append(d_kv_len)
 
     page_block_size = 1
     num_kv_heads = 4
@@ -244,5 +270,6 @@ if __name__ == "__main__":
             head_dim=head_dim,
             device=0,
             causal=True,
+            profile=args.profile,
         )
     torch.cuda.cudart().cudaProfilerStop()
