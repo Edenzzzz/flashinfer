@@ -60,8 +60,22 @@ __global__ __launch_bounds__(
         value) void PersistentKernelTemplate(const __grid_constant__
                                              typename BlockPersistentRunner1::Params params_1,
                                              const __grid_constant__
-                                             typename BlockPersistentRunner2::Params params_2) {
+                                             typename BlockPersistentRunner2::Params params_2,
+                                             int* cta_counter) {
   extern __shared__ uint8_t smem[];
+  int sm_id, cta_count;
+  if (threadIdx.x == 0) {
+    asm volatile("mov.u32 %0, %smid;" : "=r"(sm_id));
+    cta_count = atomicAdd(cta_counter + sm_id, 1);
+    ((int*)smem)[0] = cta_count;
+    // if (cta_count % 2 == 0) {
+    //   printf("Debug: cta %d on sm %d running normal order\n", cta_count, sm_id);
+    // } else {
+    //   printf("Debug: cta %d on sm %d running reverse order\n", cta_count, sm_id);
+    // }
+  }
+  __syncthreads();
+  cta_count = ((int*)smem)[0];
 
 #ifdef FLASHINFER_ENABLE_PROFILER
   ProfilerClosure
@@ -76,17 +90,26 @@ __global__ __launch_bounds__(
   auto grid = cg::this_grid();
 
 #ifndef FLASHINFER_ENABLE_PROFILER
-  BlockPersistentRunner1::Run(params_1, &smem_storage_1);
-  BlockPersistentRunner2::Run(params_2, &smem_storage_2);
-
+  if (cta_count % 2 == 0) {
+    BlockPersistentRunner1::Run(params_1, &smem_storage_1);  // tile size 128
+    BlockPersistentRunner2::Run(params_2, &smem_storage_2);  // tile size 16
+  } else {
+    BlockPersistentRunner2::Run(params_2, &smem_storage_2);
+    BlockPersistentRunner1::Run(params_1, &smem_storage_1);
+  }
   grid.sync();
   BlockReductionRunner::Run(params_1.partial_o, params_1.final_o, params_1.partial_lse,
                             params_1.final_lse, *(params_1.num_packed_qo_len),
                             params_1.gqa_group_size, params_1.num_kv_heads, params_1.merge_indptr,
                             params_1.merge_o_indices, smem);
 #else
-  BlockPersistentRunner1::Run(params_1, &smem_storage_1, profiler_closure);
-  BlockPersistentRunner2::Run(params_2, &smem_storage_2, profiler_closure);
+  if (cta_count % 2 == 0) {
+    BlockPersistentRunner1::Run(params_1, &smem_storage_1, profiler_closure);
+    BlockPersistentRunner2::Run(params_2, &smem_storage_2, profiler_closure);
+  } else {
+    BlockPersistentRunner2::Run(params_2, &smem_storage_2, profiler_closure);
+    BlockPersistentRunner1::Run(params_1, &smem_storage_1, profiler_closure);
+  }
 
   grid.sync();
   BlockReductionRunner::Run(params_1.partial_o, params_1.final_o, params_1.partial_lse,

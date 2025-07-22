@@ -578,7 +578,6 @@ cudaError_t BatchPagedAttentionPersistent(const Params params_1, const Params pa
   size_t smem_size =
       max(sizeof(typename KTraits1::SharedStorage), sizeof(typename KTraits2::SharedStorage));
   smem_size = max(smem_size, ReductionKTraits::SMEM_SIZE);
-
   // Launch persistent kernel
   auto kernel = PersistentKernelTemplate<BlockBatchPagedAttentionPersistent<KTraits1, Params>,
                                          BlockBatchPagedAttentionPersistent<KTraits2, Params>,
@@ -587,7 +586,20 @@ cudaError_t BatchPagedAttentionPersistent(const Params params_1, const Params pa
       cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
   dim3 nblks(num_blks_x, num_blks_y);
   dim3 nthrs(NUM_THREADS);
-  void* args[] = {(void*)&params_1, (void*)&params_2};
+  int num_sm = 0;
+  int num_ctas_per_sm = 0;
+  int* cta_counter = nullptr;
+  FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&num_sm, cudaDevAttrMultiProcessorCount, 0));
+  FLASHINFER_CUDA_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&num_ctas_per_sm, kernel,
+                                                                     NUM_THREADS, smem_size));
+  FLASHINFER_CUDA_CALL(
+      cudaMallocAsync(&cta_counter, sizeof(int) * num_sm * num_ctas_per_sm, stream));
+  FLASHINFER_CUDA_CALL(
+      cudaMemsetAsync(cta_counter, 0, sizeof(int) * num_sm * num_ctas_per_sm, stream));
+
+  void* args[] = {(void*)&params_1, (void*)&params_2, (void*)&cta_counter};
+
+  // CTA counter for prefill-decode overlap
   FLASHINFER_CUDA_CALL(
       cudaLaunchCooperativeKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
   return cudaSuccess;

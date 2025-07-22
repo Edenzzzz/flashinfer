@@ -60,8 +60,8 @@ constexpr uint32_t get_num_warps_q(const uint32_t cta_tile_q) {
   }
 }
 
-constexpr uint32_t get_num_warps_kv(const uint32_t cta_tile_kv) {
-  return 4 / get_num_warps_q(cta_tile_kv);
+constexpr uint32_t get_num_warps_kv(const uint32_t cta_tile_q) {
+  return 4 / get_num_warps_q(cta_tile_q);
 }
 
 constexpr uint32_t get_num_mma_q(const uint32_t cta_tile_q) {
