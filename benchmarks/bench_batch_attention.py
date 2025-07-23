@@ -97,10 +97,13 @@ def run_bench(
 
 def synthesize_seq_len_configs() -> List[List[Tuple[int, int]]]:
     cfgs: List[List[Tuple[int, int]]] = [
-        [(8192, 1)] * 128,  # decode-only
-        [(4096, 128)] * 4,  # prefill-only
-        [(600, 1)] * 122 + [(10_000, 17)] * 8,  # hybird
-        [(8192, 1)] * 127 * 2 + [(2048, 512)] * 1,  # hybrid (chunked-prefill)
+        # [(8192, 1)] * 128,  # decode-only
+        # [(4096, 128)] * 4,  # prefill-only
+        # [(600, 1)] * 122 + [(10_000, 17)] * 8,  # hybird
+        # [(900, 1)] * 120 + [(10_000, 2000)] * 8,  # hybird
+        # [(8192, 1)] * 127 * 2 + [(2048, 512)] * 1,  # hybrid (chunked-prefill)
+        [(8192, 1)] * 127 * 2
+        + [(8192, 4096)] * 1,  # hybrid (chunked-prefill)
     ]
 
     def _rand_case(bsz: int, lo: int, hi: int) -> List[Tuple[int, int]]:
@@ -114,8 +117,8 @@ def synthesize_seq_len_configs() -> List[List[Tuple[int, int]]]:
                 out.append((int(kv_len * sparsity), 1))
         return out
 
-    cfgs.append(_rand_case(256, 1000, 8192))
-    cfgs.append(_rand_case(128, 2000, 16_000))
+    # cfgs.append(_rand_case(256, 1000, 8192))
+    # cfgs.append(_rand_case(128, 2000, 16_000))
     return cfgs
 
 
@@ -132,8 +135,8 @@ def main() -> None:
         "num_qo_heads": (28,),
     }
 
-    records = []
-
+    records_old = []
+    records_new = []
     for cfg_id, pairs in enumerate(seq_len_cfgs, start=1):
         kv_lens = [p[0] for p in pairs]
         qo_lens = [p[1] for p in pairs]
@@ -154,7 +157,7 @@ def main() -> None:
                 device=0,
                 causal=True,
             )
-            records.extend(
+            records_old.extend(
                 [
                     {
                         "scheduler": "BatchPrefillWithPagedKVCacheWrapper",
@@ -167,6 +170,10 @@ def main() -> None:
                         "memory_MB": mem_MB,
                         "bandwidth_GB_s": bw_old,
                     },
+                ]
+            )
+            records_new.extend(
+                [
                     {
                         "scheduler": "BatchAttentionWrapper",
                         "seq_cfg_id": cfg_id,
@@ -182,7 +189,7 @@ def main() -> None:
             )
 
     df = pd.DataFrame(
-        records,
+        records_old + records_new,
         columns=[
             "scheduler",
             "seq_cfg_id",
@@ -195,6 +202,7 @@ def main() -> None:
             "bandwidth_GB_s",
         ],
     )
+    df.to_csv("bench_batch_attention.csv", index=False)
     print(df.to_markdown(index=False, floatfmt=".2f"))
 
 

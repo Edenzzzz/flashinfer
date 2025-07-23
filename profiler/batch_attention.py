@@ -98,7 +98,7 @@ def profile_persistent_batch_attention(
 
     wrapper.run(q, kv_data, profiler_buffer=profiler_buffer)
 
-    trace_name = f"batch_attention.perfetto-trace"
+    trace_name = f"batch_attention_reverse.perfetto-trace"
     events = ["prefill", "decode", "reduction"]
     export_to_perfetto_trace(profiler_buffer, events, trace_name)
 
@@ -177,7 +177,10 @@ if __name__ == "__main__":
     parser.add_argument("--use-profiler", action="store_true")
     args = parser.parse_args()
 
-    seq_len_config = [(600, 1)] * 122 + [(10000, 17)] * 8
+    # seq_len_config = [(600, 1)] * 122 + [(10000, 17)] * 8
+    seq_len_config = [(8192, 1)] * 127 * 2 + [
+        (8192, 4096)
+    ] * 1  # hybrid (chunked-prefill)
 
     kv_lens = [p[0] for p in seq_len_config]
     qo_lens = [p[1] for p in seq_len_config]
