@@ -590,14 +590,16 @@ cudaError_t BatchPagedAttentionPersistent(const Params params_1, const Params pa
   // CTA counter for prefill-decode overlap
   int num_sm = 0;
   int num_ctas_per_sm = 0;
-  int* cta_counter = nullptr;
-  FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&num_sm, cudaDevAttrMultiProcessorCount, 0));
-  FLASHINFER_CUDA_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&num_ctas_per_sm, kernel,
-                                                                     NUM_THREADS, smem_size));
-  FLASHINFER_CUDA_CALL(
-      cudaMallocAsync(&cta_counter, sizeof(int) * num_sm * num_ctas_per_sm, stream));
-  FLASHINFER_CUDA_CALL(
-      cudaMemsetAsync(cta_counter, 0, sizeof(int) * num_sm * num_ctas_per_sm, stream));
+  static int* cta_counter = nullptr;
+  if (cta_counter == nullptr) {
+    FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&num_sm, cudaDevAttrMultiProcessorCount, 0));
+    FLASHINFER_CUDA_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&num_ctas_per_sm, kernel,
+                                                                       NUM_THREADS, smem_size));
+    FLASHINFER_CUDA_CALL(
+        cudaMallocAsync(&cta_counter, sizeof(int) * num_sm * num_ctas_per_sm, stream));
+    FLASHINFER_CUDA_CALL(
+        cudaMemsetAsync(cta_counter, 0, sizeof(int) * num_sm * num_ctas_per_sm, stream));
+  }
 
   void* args[] = {(void*)&params_1, (void*)&params_2, (void*)&cta_counter};
 
