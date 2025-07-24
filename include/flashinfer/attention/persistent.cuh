@@ -586,6 +586,8 @@ cudaError_t BatchPagedAttentionPersistent(const Params params_1, const Params pa
       cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
   dim3 nblks(num_blks_x, num_blks_y);
   dim3 nthrs(NUM_THREADS);
+
+  // CTA counter for prefill-decode overlap
   int num_sm = 0;
   int num_ctas_per_sm = 0;
   int* cta_counter = nullptr;
@@ -599,7 +601,6 @@ cudaError_t BatchPagedAttentionPersistent(const Params params_1, const Params pa
 
   void* args[] = {(void*)&params_1, (void*)&params_2, (void*)&cta_counter};
 
-  // CTA counter for prefill-decode overlap
   FLASHINFER_CUDA_CALL(
       cudaLaunchCooperativeKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
   return cudaSuccess;
