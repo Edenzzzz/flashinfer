@@ -97,13 +97,12 @@ def run_bench(
 
 def synthesize_seq_len_configs() -> List[List[Tuple[int, int]]]:
     cfgs: List[List[Tuple[int, int]]] = [
-        # [(8192, 1)] * 128,  # decode-only
-        # [(4096, 128)] * 4,  # prefill-only
-        # [(600, 1)] * 122 + [(10_000, 17)] * 8,  # hybird
-        # [(900, 1)] * 120 + [(10_000, 2000)] * 8,  # hybird
+        [(8192, 1)] * 128,  # decode-only
+        [(4096, 128)] * 4,  # prefill-only
+        [(600, 1)] * 122 + [(10_000, 17)] * 8,  # hybird
+        [(900, 1)] * 120 + [(10_000, 2000)] * 8,  # hybird
         # [(8192, 1)] * 127 * 2 + [(2048, 512)] * 1,  # hybrid (chunked-prefill)
-        [(8192, 1)] * 127 * 2
-        + [(8192, 4096)] * 1,  # hybrid (chunked-prefill)
+        [(8192, 1)] * 127 * 2 + [(8192, 4096)] * 1,  # hybrid (chunked-prefill)
     ]
 
     def _rand_case(bsz: int, lo: int, hi: int) -> List[Tuple[int, int]]:
@@ -202,7 +201,7 @@ def main() -> None:
             "bandwidth_GB_s",
         ],
     )
-    df.to_csv("bench_batch_attention.csv", index=False)
+    df.to_csv("bench_batch_attention_flipped.csv", index=False)
     print(df.to_markdown(index=False, floatfmt=".2f"))
 
 
