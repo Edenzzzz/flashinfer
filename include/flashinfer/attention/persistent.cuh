@@ -562,6 +562,7 @@ template <uint32_t CTA_TILE_Q_1, uint32_t CTA_TILE_Q_2, uint32_t HEAD_DIM_QK, ui
           MaskMode MASK_MODE, typename AttentionVariant, typename Params>
 cudaError_t BatchPagedAttentionPersistent(const Params params_1, const Params params_2,
                                           const uint32_t num_blks_x, const uint32_t num_blks_y,
+                                          const bool flipped_schedule = false,
                                           const cudaStream_t stream) {
   using DTypeQ = typename Params::DTypeQ;
   using DTypeKV = typename Params::DTypeKV;
@@ -605,7 +606,7 @@ cudaError_t BatchPagedAttentionPersistent(const Params params_1, const Params pa
   int num_sm = 0;
   int num_ctas_per_sm = 0;
   static int* cta_counter = nullptr;
-  if (cta_counter == nullptr) {
+  if (flipped_schedule) {
     FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&num_sm, cudaDevAttrMultiProcessorCount, 0));
     FLASHINFER_CUDA_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&num_ctas_per_sm, kernel,
                                                                        NUM_THREADS, smem_size));

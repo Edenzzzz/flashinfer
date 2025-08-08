@@ -61,21 +61,18 @@ __global__ __launch_bounds__(
                                              typename BlockPersistentRunner1::Params params_1,
                                              const __grid_constant__
                                              typename BlockPersistentRunner2::Params params_2,
-                                             int* cta_counter) {
+                                             int* cta_counter = nullptr) {
   extern __shared__ uint8_t smem[];
-  int sm_id, cta_count;
-  if (threadIdx.x == 0) {
-    asm volatile("mov.u32 %0, %smid;" : "=r"(sm_id));
-    cta_count = atomicAdd(cta_counter + sm_id, 1);
-    ((int*)smem)[0] = cta_count;
-    // if (cta_count % 2 == 0) {
-    //   printf("Debug: cta %d on sm %d running normal order\n", cta_count, sm_id);
-    // } else {
-    //   printf("Debug: cta %d on sm %d running reverse order\n", cta_count, sm_id);
-    // }
+  int sm_id, cta_count = 0;
+  if (cta_counter != nullptr) {
+    if (threadIdx.x == 0) {
+      asm volatile("mov.u32 %0, %smid;" : "=r"(sm_id));
+      cta_count = atomicAdd(cta_counter + sm_id, 1);
+      ((int*)smem)[0] = cta_count;
+    }
+    __syncthreads();
+    cta_count = ((int*)smem)[0];
   }
-  __syncthreads();
-  cta_count = ((int*)smem)[0];
 
 #ifdef FLASHINFER_ENABLE_PROFILER
   ProfilerClosure
