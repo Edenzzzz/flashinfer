@@ -562,8 +562,7 @@ template <uint32_t CTA_TILE_Q_1, uint32_t CTA_TILE_Q_2, uint32_t HEAD_DIM_QK, ui
           MaskMode MASK_MODE, typename AttentionVariant, typename Params>
 cudaError_t BatchPagedAttentionPersistent(const Params params_1, const Params params_2,
                                           const uint32_t num_blks_x, const uint32_t num_blks_y,
-                                          const bool flipped_schedule = false,
-                                          const cudaStream_t stream) {
+                                          const bool flipped_schedule, const cudaStream_t stream) {
   using DTypeQ = typename Params::DTypeQ;
   using DTypeKV = typename Params::DTypeKV;
   using DTypeO = typename Params::DTypeO;

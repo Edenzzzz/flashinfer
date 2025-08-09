@@ -138,6 +138,7 @@ class BatchAttention:
         lse: Optional[torch.Tensor] = None,
         logits_soft_cap: float = 0.0,
         profiler_buffer: Optional[torch.Tensor] = None,
+        flipped_schedule: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if profiler_buffer is None:
             if self._use_profiler:
@@ -180,6 +181,7 @@ class BatchAttention:
             self._page_size,
             self._sm_scale,
             logits_soft_cap,
+            flipped_schedule,
             # ADDITIONAL_FUNC_PARAMS
             # PROFILER_FUNC_PARAMS
             *profiler_args,

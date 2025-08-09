@@ -21,7 +21,7 @@ def run_bench(
     head_dim: int,
     device: int = 0,
     causal: bool = True,
-) -> Tuple[float, float, float, float, float]:
+) -> Tuple[float, float, float, float, float, float, float]:
     seq_lens = torch.tensor(kv_lens, dtype=torch.int32)
     q_lens = torch.tensor(qo_lens, dtype=torch.int32)
     seq_lens_blocks = torch.ceil(seq_lens / page_block_size).int()
@@ -91,8 +91,11 @@ def run_bench(
     mem_MB = total_bytes / 1024**2
     bw_old = total_bytes / (ms_old * 1e-3) / 1024**3
     bw_new = total_bytes / (ms_new * 1e-3) / 1024**3
+    # Flipped schedule
+    ms_flipped = do_bench(lambda: wrapper.run(q, kv_data, flipped_schedule=True))
+    bw_flipped = total_bytes / (ms_flipped * 1e-3) / 1024**3
 
-    return ms_old, ms_new, mem_MB, bw_old, bw_new
+    return ms_old, ms_new, mem_MB, bw_old, bw_new, ms_flipped, bw_flipped
 
 
 def synthesize_seq_len_configs() -> List[List[Tuple[int, int]]]:
@@ -135,6 +138,7 @@ def main() -> None:
 
     records_old = []
     records_new = []
+    records_flipped = []
     for cfg_id, pairs in enumerate(seq_len_cfgs, start=1):
         kv_lens = [p[0] for p in pairs]
         qo_lens = [p[1] for p in pairs]
@@ -145,7 +149,7 @@ def main() -> None:
             sweep["num_qo_heads"],
         ):
 
-            ms_old, ms_new, mem_MB, bw_old, bw_new = run_bench(
+            ms_old, ms_new, mem_MB, bw_old, bw_new, ms_flipped, bw_flipped = run_bench(
                 kv_lens,
                 qo_lens,
                 page_block_size=pbs,
@@ -185,9 +189,24 @@ def main() -> None:
                     },
                 ]
             )
+            records_flipped.extend(
+                [
+                    {
+                        "scheduler": "BatchAttentionWrapper (flipped)",
+                        "seq_cfg_id": cfg_id,
+                        "page_size": pbs,
+                        "head_dim": hd,
+                        "num_kv_heads": n_kv,
+                        "num_qo_heads": n_qo,
+                        "time_ms": ms_flipped,
+                        "memory_MB": mem_MB,
+                        "bandwidth_GB_s": bw_flipped,
+                    },
+                ]
+            )
 
     df = pd.DataFrame(
-        records_old + records_new,
+        records_old + records_new + records_flipped,
         columns=[
             "scheduler",
             "seq_cfg_id",

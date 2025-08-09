@@ -34,6 +34,7 @@ def profile_persistent_batch_attention(
     causal,
     profiler_buffer_size,
     device="cuda",
+    flipped=False,
 ):
     seq_lens = torch.tensor(kv_lens, dtype=torch.int32)
     q_lens = torch.tensor(qo_lens, dtype=torch.int32)
@@ -93,12 +94,12 @@ def profile_persistent_batch_attention(
     )
 
     # warmup
-    wrapper.run(q, kv_data, profiler_buffer=profiler_buffer)
+    wrapper.run(q, kv_data, profiler_buffer=profiler_buffer, flipped_schedule=flipped)
     profiler_buffer.zero_()
 
-    wrapper.run(q, kv_data, profiler_buffer=profiler_buffer)
+    wrapper.run(q, kv_data, profiler_buffer=profiler_buffer, flipped_schedule=flipped)
 
-    trace_name = f"batch_attention_reverse.perfetto-trace"
+    trace_name = f"batch_attention.perfetto-trace"
     events = ["prefill", "decode", "reduction"]
     export_to_perfetto_trace(profiler_buffer, events, trace_name)
 
@@ -116,6 +117,7 @@ def persistent_batch_attention(
     test_dtype,
     causal,
     device="cuda",
+    flipped=False,
 ):
     seq_lens = torch.tensor(kv_lens, dtype=torch.int32)
     q_lens = torch.tensor(qo_lens, dtype=torch.int32)
@@ -168,13 +170,14 @@ def persistent_batch_attention(
         q_data_type=test_dtype,
         kv_data_type=test_dtype,
     )
-    wrapper.run(q, kv_data)
+    wrapper.run(q, kv_data, flipped_schedule=flipped)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--profiler-buffer-size", type=int, default=1048576)
     parser.add_argument("--use-profiler", action="store_true")
+    parser.add_argument("--flipped", action="store_true")
     args = parser.parse_args()
 
     # seq_len_config = [(600, 1)] * 122 + [(10000, 17)] * 8
@@ -205,6 +208,7 @@ if __name__ == "__main__":
             layout=layout,
             test_dtype=test_dtype,
             causal=causal,
+            flipped=args.flipped,
         )
     else:
         persistent_batch_attention(
@@ -217,4 +221,5 @@ if __name__ == "__main__":
             layout=layout,
             test_dtype=test_dtype,
             causal=causal,
+            flipped=args.flipped,
         )
