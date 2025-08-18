@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import itertools
 from typing import List, Sequence, Tuple
 
@@ -21,6 +22,7 @@ def run_bench(
     head_dim: int,
     device: int = 0,
     causal: bool = True,
+    flipped_schedule: bool = False,
 ) -> Tuple[float, float, float, float, float, float, float]:
     seq_lens = torch.tensor(kv_lens, dtype=torch.int32)
     q_lens = torch.tensor(qo_lens, dtype=torch.int32)
@@ -65,7 +67,6 @@ def run_bench(
         q_data_type=torch.bfloat16,
         kv_data_type=torch.bfloat16,
     )
-    ms_old = do_bench(lambda: wrapper_old.run(q, kv_data))
 
     # new
     wrapper = flashinfer.BatchAttention(kv_layout="NHD")
@@ -83,7 +84,10 @@ def run_bench(
         q_data_type=torch.bfloat16,
         kv_data_type=torch.bfloat16,
     )
-    ms_new = do_bench(lambda: wrapper.run(q, kv_data))
+    ms_old = do_bench(lambda: wrapper_old.run(q, kv_data))
+    ms_new = do_bench(
+        lambda: wrapper.run(q, kv_data, flipped_schedule=flipped_schedule)
+    )
 
     total_bytes = (
         q.numel() * q.element_size() + kv_data.numel() * kv_data.element_size()
@@ -91,20 +95,18 @@ def run_bench(
     mem_MB = total_bytes / 1024**2
     bw_old = total_bytes / (ms_old * 1e-3) / 1024**3
     bw_new = total_bytes / (ms_new * 1e-3) / 1024**3
-    # Flipped schedule
-    ms_flipped = do_bench(lambda: wrapper.run(q, kv_data, flipped_schedule=True))
-    bw_flipped = total_bytes / (ms_flipped * 1e-3) / 1024**3
 
-    return ms_old, ms_new, mem_MB, bw_old, bw_new, ms_flipped, bw_flipped
+    return ms_old, ms_new, mem_MB, bw_old, bw_new
 
 
 def synthesize_seq_len_configs() -> List[List[Tuple[int, int]]]:
     cfgs: List[List[Tuple[int, int]]] = [
-        [(8192, 1)] * 128,  # decode-only
-        [(4096, 128)] * 4,  # prefill-only
-        [(600, 1)] * 122 + [(10_000, 17)] * 8,  # hybird
+        # [(8192, 1)] * 128,  # decode-only
+        # [(4096, 128)] * 4,  # prefill-only
+        # [(600, 1)] * 122 + [(10_000, 17)] * 8,  # hybird
         # [(8192, 1)] * 127 * 2 + [(2048, 512)] * 1,  # hybrid (chunked-prefill)
-        [(8192, 1)] * 127 * 2 + [(8192, 4096)] * 1,  # hybrid (chunked-prefill)
+        [(8192, 1)] * 127 * 2
+        + [(8192, 4096)] * 1,  # hybrid (chunked-prefill)
     ]
 
     def _rand_case(bsz: int, lo: int, hi: int) -> List[Tuple[int, int]]:
@@ -123,7 +125,7 @@ def synthesize_seq_len_configs() -> List[List[Tuple[int, int]]]:
     return cfgs
 
 
-def main() -> None:
+def main(args: argparse.Namespace) -> None:
     np.random.seed(42)
     torch.random.manual_seed(42)
 
@@ -149,7 +151,7 @@ def main() -> None:
             sweep["num_qo_heads"],
         ):
 
-            ms_old, ms_new, mem_MB, bw_old, bw_new, ms_flipped, bw_flipped = run_bench(
+            ms_old, ms_new, mem_MB, bw_old, bw_new = run_bench(
                 kv_lens,
                 qo_lens,
                 page_block_size=pbs,
@@ -158,6 +160,7 @@ def main() -> None:
                 head_dim=hd,
                 device=0,
                 causal=True,
+                flipped_schedule=args.flipped,
             )
             records_old.extend(
                 [
@@ -177,7 +180,8 @@ def main() -> None:
             records_new.extend(
                 [
                     {
-                        "scheduler": "BatchAttentionWrapper",
+                        "scheduler": "BatchAttentionWrapper"
+                        + (" (flipped)" if args.flipped else ""),
                         "seq_cfg_id": cfg_id,
                         "page_size": pbs,
                         "head_dim": hd,
@@ -189,24 +193,9 @@ def main() -> None:
                     },
                 ]
             )
-            records_flipped.extend(
-                [
-                    {
-                        "scheduler": "BatchAttentionWrapper (flipped)",
-                        "seq_cfg_id": cfg_id,
-                        "page_size": pbs,
-                        "head_dim": hd,
-                        "num_kv_heads": n_kv,
-                        "num_qo_heads": n_qo,
-                        "time_ms": ms_flipped,
-                        "memory_MB": mem_MB,
-                        "bandwidth_GB_s": bw_flipped,
-                    },
-                ]
-            )
 
     df = pd.DataFrame(
-        records_old + records_new + records_flipped,
+        records_old + records_new,
         columns=[
             "scheduler",
             "seq_cfg_id",
@@ -219,9 +208,21 @@ def main() -> None:
             "bandwidth_GB_s",
         ],
     )
-    df.to_csv("bench_batch_attention_flipped.csv", index=False)
+    file_name = (
+        "bench_batch_attention.csv"
+        if not args.flipped
+        else "bench_batch_attention_flipped.csv"
+    )
+    df.to_csv(file_name, index=False)
     print(df.to_markdown(index=False, floatfmt=".2f"))
 
 
 if __name__ == "__main__":
-    main()
+    # (NOTE)Somehow running the flipped schedule together with the normal schedule in one run causes incorrect performance for both
+    # (slightly decrease for flipped, slightly increase for normal)
+    # Flushing the l2 cache doesn't help. So we split the runs for now
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--flipped", action="store_true")
+    args = parser.parse_args()
+    main(args)
