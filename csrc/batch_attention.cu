@@ -140,6 +140,8 @@ void BatchPagedAttentionRun(at::Tensor float_workspace_buffer, at::Tensor int_wo
           params[i].work_indptr =
               GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.tasks[i].work_indptr_offset);
           params[i].len_kv_chunk = len_kv_chunk + i;
+          params[i].barrier_idx =
+              GetPtrFromBaseOffset<uint32_t>(int_buffer_ptr, plan_info.tasks[i].barrier_idx_offset);
 
           params[i].final_o = static_cast<DTypeO*>(o.data_ptr());
           params[i].final_lse =
@@ -154,6 +156,8 @@ void BatchPagedAttentionRun(at::Tensor float_workspace_buffer, at::Tensor int_wo
               GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.merge_indptr_offset);
           params[i].merge_o_indices =
               GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.merge_o_indices_offset);
+          params[i].merged_barrier_idx =
+              GetPtrFromBaseOffset<uint32_t>(int_buffer_ptr, plan_info.merged_barrier_idx_offset);
           params[i].num_packed_qo_len =
               GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.num_qo_len_offset);
 
@@ -174,6 +178,11 @@ void BatchPagedAttentionRun(at::Tensor float_workspace_buffer, at::Tensor int_wo
           params[i].logits_soft_cap = logits_soft_cap;
           // NOTE(Wenxuan) directly using the additional_params_decl from generate_additional_params
           // will be problematic because of the params[i]
+
+          // named barriers
+          params[i].barrier_vec =
+              GetPtrFromBaseOffset<uint32_t>(int_buffer_ptr, plan_info.barrier_vec_offset);
+
           ADDITIONAL_PARAMS_SETTER
           PROFILER_PARAMS_SETTER
         }
