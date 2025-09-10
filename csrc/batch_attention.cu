@@ -110,6 +110,15 @@ void BatchPagedAttentionRun(at::Tensor float_workspace_buffer, at::Tensor int_wo
   DISPATCH_context(
       DTypeQ, DTypeKV, DTypeO, IdType, MASK_MODE, HEAD_DIM_QK, HEAD_DIM_VO, POS_ENCODING_MODE,
       AttentionVariant, PersistentParams, [&] {
+        // Must reset the barrier vec on every call
+        uint32_t* barrier_vec =
+            GetPtrFromBaseOffset<uint32_t>(int_buffer_ptr, plan_info.barrier_vec_offset);
+        uint32_t* barrier_vec_copy =
+            GetPtrFromBaseOffset<uint32_t>(int_buffer_ptr, plan_info.barrier_vec_copy_offset);
+        auto barrier_vec_size_h = plan_info.barrier_vec_size;
+        cudaMemcpyAsync(barrier_vec_copy, barrier_vec, sizeof(uint32_t) * barrier_vec_size_h,
+                        cudaMemcpyDeviceToDevice, stream);
+
         PersistentParams params[2];
         IdType* len_kv_chunk =
             GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.len_kv_chunk_offset);
@@ -180,8 +189,7 @@ void BatchPagedAttentionRun(at::Tensor float_workspace_buffer, at::Tensor int_wo
           // will be problematic because of the params[i]
 
           // named barriers
-          params[i].barrier_vec =
-              GetPtrFromBaseOffset<uint32_t>(int_buffer_ptr, plan_info.barrier_vec_offset);
+          params[i].barrier_vec = barrier_vec_copy;
 
           ADDITIONAL_PARAMS_SETTER
           PROFILER_PARAMS_SETTER

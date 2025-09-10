@@ -1024,7 +1024,7 @@ struct HolisticPlanInfo {
   int64_t num_qo_len_offset;
   int64_t barrier_vec_offset;
   int64_t barrier_vec_copy_offset;
-  int64_t barrier_vec_size_offset;
+  int64_t barrier_vec_size;
 
   static constexpr uint32_t NUM_TASK_ARGS = 11;
   static constexpr uint32_t NUM_SHARED_ARGS = 12;
@@ -1055,7 +1055,7 @@ struct HolisticPlanInfo {
     vec.push_back(num_qo_len_offset);
     vec.push_back(barrier_vec_offset);
     vec.push_back(barrier_vec_copy_offset);
-    vec.push_back(barrier_vec_size_offset);
+    vec.push_back(barrier_vec_size);
     return vec;
   }
 
@@ -1090,7 +1090,7 @@ struct HolisticPlanInfo {
     num_qo_len_offset = vec[8 + NUM_TASKS * NUM_TASK_ARGS];
     barrier_vec_offset = vec[9 + NUM_TASKS * NUM_TASK_ARGS];
     barrier_vec_copy_offset = vec[10 + NUM_TASKS * NUM_TASK_ARGS];
-    barrier_vec_size_offset = vec[11 + NUM_TASKS * NUM_TASK_ARGS];
+    barrier_vec_size = vec[11 + NUM_TASKS * NUM_TASK_ARGS];
   }
 };
 
@@ -1366,6 +1366,8 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
       int_allocator.aligned_alloc_offset(sizeof(uint32_t) * max_total_num_works, 16, "barrier_vec");
   plan_info.barrier_vec_copy_offset = int_allocator.aligned_alloc_offset(
       sizeof(uint32_t) * max_total_num_works, 16, "barrier_vec_copy");
+  plan_info.barrier_vec_size = max_total_num_works;
+
   // copy data to paged cpu buffer
   CopyToPageLockedBuffer(page_locked_int_buffer, plan_info.merge_indptr_offset, merge_indptr);
   CopyToPageLockedBuffer(page_locked_int_buffer, plan_info.merge_o_indices_offset, merge_o_indices);

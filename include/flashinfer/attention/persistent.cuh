@@ -45,7 +45,7 @@ struct GmemBarrier {
     }
   }
 
-  __device__ __forceinline__ void wait(uint32_t off, bool predicate) {
+  __device__ __forceinline__ void wait(uint32_t off, bool predicate, int loop_id) {
     if (predicate) {
       auto ld_acquire_gpu = [](uint32_t* ptr) -> uint32_t {
         uint32_t ans;
