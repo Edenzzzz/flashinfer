@@ -99,6 +99,7 @@ def run_bench(
 
 def synthesize_seq_len_configs() -> List[List[Tuple[int, int]]]:
     cfgs: List[List[Tuple[int, int]]] = [
+        [(8192, 1)] * 16,  # decode-only, small req rate
         [(8192, 1)] * 128,  # decode-only
         [(4096, 128)] * 4,  # prefill-only
         [(600, 1)] * 122 + [(10_000, 17)] * 8,  # hybird

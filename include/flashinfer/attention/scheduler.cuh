@@ -128,6 +128,48 @@ inline auto PrefillBinarySearchKVChunkSize(const bool enable_cuda_graph,
   }
   return std::make_tuple(enable_cuda_graph || low < max_kv_len, low);
 }
+inline auto HolisticBinarySearchKVChunkSize(
+    const uint32_t max_batch_size_if_split,
+    const std::vector<std::tuple<int, int, int>>* idx_qo_kv_len_vec,
+    const uint32_t* CTA_TILE_Q_SIZES, const uint32_t num_kv_heads,
+    const uint32_t min_kv_chunk_size = 1) {
+  constexpr uint32_t NUM_TASKS = 2;
+  uint32_t max_kv_len = 1;
+
+  // Find max kv_len across all tasks
+  for (uint32_t task = 0; task < NUM_TASKS; ++task) {
+    for (const auto& [i, qo_len, kv_len] : idx_qo_kv_len_vec[task]) {
+      max_kv_len = std::max(max_kv_len, static_cast<uint32_t>(kv_len));
+    }
+  }
+
+  uint32_t low = min_kv_chunk_size;
+  uint32_t high = max_kv_len;
+  constexpr uint32_t min_kv_len = 1;
+  while (low < high) {
+    const uint32_t mid = (low + high) / 2;
+    uint32_t new_batch_size = 0;
+
+    for (uint32_t task = 0; task < NUM_TASKS; ++task) {
+      const uint32_t qo_chunk_size = CTA_TILE_Q_SIZES[task];
+      for (const auto& [i, qo_len, kv_len] : idx_qo_kv_len_vec[task]) {
+        uint32_t kv_len_limit = mid;
+        if (qo_chunk_size >= 64) {
+          kv_len_limit *= num_kv_heads;
+        }
+        new_batch_size += ceil_div(static_cast<uint32_t>(qo_len), qo_chunk_size) *
+                          ceil_div(std::max(static_cast<uint32_t>(kv_len), low), kv_len_limit);
+      }
+    }
+
+    if (new_batch_size > max_batch_size_if_split) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+  return low;
+}
 
 /*!
  * \brief Estimate the temporary buffer size and the maximum grid size for the
@@ -1117,6 +1159,7 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
 
   // step 0. determine the number of blocks in x and y dimensions
   std::vector<std::tuple<int, int, int>> idx_qo_kv_len_vec[NUM_TASKS];
+  std::vector<int64_t> packed_qo_len_arr(batch_size), kv_len_arr(batch_size);
   for (uint32_t i = 0; i < batch_size; ++i) {
     if (qo_indptr_h[i + 1] - qo_indptr_h[i] < 0) {
       std::ostringstream err_msg;
@@ -1124,10 +1167,12 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
               << qo_indptr_h[i] << " should be non-negative";
       FLASHINFER_ERROR(err_msg.str());
     }
+    packed_qo_len_arr[i] = int64_t(qo_indptr_h[i + 1] - qo_indptr_h[i]) * int64_t(gqa_group_size);
 
     int qo_len = qo_indptr_h[i + 1] - qo_indptr_h[i];
     int packed_qo_len = qo_len * gqa_group_size;
     int kv_len = kv_len_arr_h[i];
+    kv_len_arr[i] = kv_len;
 
     if (packed_qo_len > CTA_TILE_Q_SIZES[1]) {
       idx_qo_kv_len_vec[0].push_back({i, qo_len, kv_len});
@@ -1136,6 +1181,12 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
     }
   }
 
+  int kv_split_size;
+  if (batch_size < num_sm) {
+    // min split size that saturates SMs
+    kv_split_size =
+        HolisticBinarySearchKVChunkSize(num_sm, idx_qo_kv_len_vec, CTA_TILE_Q_SIZES, num_kv_heads);
+  }
   int cluster_size = 1;
   int num_clusters = num_sm / cluster_size;
   plan_info.num_blks_x = cluster_size;
@@ -1184,11 +1235,15 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
   for (uint32_t task = 0; task < NUM_TASKS; ++task) {
     int cluster_tile_q = CTA_TILE_Q_SIZES[task] * cluster_size;
     int kv_len_limit = f(std::max(ceil_div(total_kv_lens * num_kv_heads, num_clusters), 1L));
+    if (batch_size < num_sm) {
+      kv_len_limit = std::min(kv_len_limit, kv_split_size);
+    }
     if (cluster_tile_q >= 64) {
       // chunked-prefill workloads are much more expensive than decode
       // so we use a smaller kv_len_limit for chunked-prefill workloads
       kv_len_limit /= std::min(num_kv_heads, 2U);
     }
+    printf("task %d v_len_limit: %d\n", task, kv_len_limit);
     cluster_len_kv_chunk[task] = kv_len_limit;
     std::vector<std::vector<IdType>> cluster_q_indptr(num_clusters, std::vector<IdType>()),
         cluster_kv_indptr(num_clusters, std::vector<IdType>()),

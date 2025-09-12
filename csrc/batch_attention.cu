@@ -39,7 +39,7 @@ at::Tensor BatchPagedAttentionPlan(at::Tensor float_workspace_buffer,
                                    at::Tensor page_locked_int_workspace_buffer,
                                    at::Tensor qo_indptr, at::Tensor kv_indptr, at::Tensor kv_len,
                                    int64_t batch_size, int64_t num_qo_heads, int64_t num_kv_heads,
-                                   int64_t head_dim_o, bool causal) {
+                                   int64_t head_dim_o, bool causal, int64_t fixed_split_size) {
   size_t float_workspace_size_in_bytes =
       float_workspace_buffer.size(0) * float_workspace_buffer.element_size();
   size_t int_workspace_size_in_bytes =
@@ -55,7 +55,7 @@ at::Tensor BatchPagedAttentionPlan(at::Tensor float_workspace_buffer,
       int_workspace_buffer.data_ptr(), page_locked_int_workspace_buffer.data_ptr(),
       int_workspace_size_in_bytes, plan_info, qo_indptr.data_ptr<IdType>(),
       kv_indptr.data_ptr<IdType>(), kv_len.data_ptr<IdType>(), batch_size, num_qo_heads,
-      num_kv_heads, head_dim_o, causal, stream);
+      num_kv_heads, head_dim_o, causal, fixed_split_size, stream);
 
   TORCH_CHECK(status == cudaSuccess,
               "Failed to plan persistent paged attention, error: ", cudaGetErrorString(status));

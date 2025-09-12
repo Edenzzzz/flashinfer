@@ -177,7 +177,8 @@ if __name__ == "__main__":
     parser.add_argument("--use-profiler", action="store_true")
     args = parser.parse_args()
 
-    seq_len_config = [(600, 1)] * 122 + [(10000, 17)] * 8
+    # seq_len_config = [(600, 1)] * 122 + [(10000, 17)] * 8
+    seq_len_config = [(8192, 1)] * 16
 
     kv_lens = [p[0] for p in seq_len_config]
     qo_lens = [p[1] for p in seq_len_config]
