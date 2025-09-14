@@ -1211,6 +1211,7 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
       // so we use a smaller kv_len_limit for chunked-prefill workloads
       kv_len_limit /= std::min(num_kv_heads, 2U);
     }
+    cluster_len_kv_chunk[task] = kv_len_limit;
     for (auto& [i, qo_len, kv_len] : idx_qo_kv_len_vec[task]) {
       int packed_qo_len = qo_len * gqa_group_size;
       int num_qo_tiles = ceil_div(packed_qo_len, cluster_tile_q);
@@ -1226,12 +1227,6 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
           // non-split kv is directly written through
           for (int row = 0; row < row_tile_size; ++row) {
             merge_indptr.push_back(merge_indptr.back() + num_kv_tiles);
-            // output layout: [qo_len, num_kv_heads, gqa_group_size, head_dim]
-            // merge_o_indices is the indices of `gqa_group_size` dimension
-            auto q = (qo_tile_idx * cluster_tile_q + row) / gqa_group_size,
-                 r = (qo_tile_idx * cluster_tile_q + row) % gqa_group_size;
-            merge_o_indices.push_back((qo_indptr_h[i] + q) * num_kv_heads * gqa_group_size + r);
-
             // compute which block this row belongs to
             uint32_t packed_seq_idx = merge_indptr.back();
             uint32_t worker_idx = packed_seq_idx % num_workers;
@@ -1239,37 +1234,20 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
             uint32_t cluster_idx = worker_idx / warps_per_block / cluster_size;
             cluster_cost_vec[cluster_idx].second +=
                 ceil_div(num_kv_tiles, reduction_cost_denominator);
-
-            // add inverse barrier idx: layout [packed_qo_len, num_kv_heads]
-            for (int kv_head_idx = 0; kv_head_idx < num_kv_heads; ++kv_head_idx) {
-              merged_barrier_idx.push_back(barrier_idx + kv_head_idx);
-            }
           }
-          partial_o_nnz += row_tile_size * num_kv_tiles;
-          // update barriers
-          for (int kv_head_idx = 0; kv_head_idx < num_kv_heads; ++kv_head_idx) {
-            barrier_vec.push_back(num_kv_tiles);
-          }
-          barrier_idx += num_kv_heads;
         }
       }
     }
   }
   // make a new heap based on reduction costs
-  for (uint32_t i = 0; i < num_clusters; ++i) {
-    printf("cluster %d reduction cost = %f\n", i, cluster_cost_vec[i].second);
-  }
+  // for (uint32_t i = 0; i < num_clusters; ++i) {
+  //   printf("cluster %d reduction cost = %f\n", i, cluster_cost_vec[i].second);
+  // }
   MinHeap cluster_cost_heap(std::move(cluster_cost_vec));
 
   for (uint32_t task = 0; task < NUM_TASKS; ++task) {
     int cluster_tile_q = CTA_TILE_Q_SIZES[task] * cluster_size;
-    int kv_len_limit = f(std::max(ceil_div(total_kv_lens * num_kv_heads, num_clusters), 1L));
-    if (cluster_tile_q >= 64) {
-      // chunked-prefill workloads are much more expensive than decode
-      // so we use a smaller kv_len_limit for chunked-prefill workloads
-      kv_len_limit /= std::min(num_kv_heads, 2U);
-    }
-    cluster_len_kv_chunk[task] = kv_len_limit;
+    int kv_len_limit = cluster_len_kv_chunk[task];
     std::vector<std::vector<IdType>> cluster_q_indptr(num_clusters, std::vector<IdType>()),
         cluster_kv_indptr(num_clusters, std::vector<IdType>()),
         cluster_q_len(num_clusters, std::vector<IdType>()),
@@ -1291,10 +1269,9 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
                                                        num_qo_tiles, gqa_group_size)
                                 : kv_len;
         int kv_start = 0;
-        // bool split_kv = remaining_len > kv_len_limit;
-        // int num_kv_tiles = split_kv ? ceil_div(remaining_len, kv_len_limit) : 1;
-        // int row_tile_size = std::min(cluster_tile_q, packed_qo_len - qo_tile_idx *
-        // cluster_tile_q);
+        bool split_kv = remaining_len > kv_len_limit;
+        int num_kv_tiles = split_kv ? ceil_div(remaining_len, kv_len_limit) : 1;
+        int row_tile_size = std::min(cluster_tile_q, packed_qo_len - qo_tile_idx * cluster_tile_q);
         bool zero_kv_len = (remaining_len == 0);
         while (remaining_len > 0 || zero_kv_len) {
           int actual_len = std::min(remaining_len, kv_len_limit);
@@ -1323,27 +1300,27 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
             break;
           }
         }
-        // if (split_kv) {
-        //   // non-split kv is directly written through
-        //   for (int row = 0; row < row_tile_size; ++row) {
-        //     merge_indptr.push_back(merge_indptr.back() + num_kv_tiles);
-        //     // output layout: [qo_len, num_kv_heads, gqa_group_size, head_dim]
-        //     // merge_o_indices is the indices of `gqa_group_size` dimension
-        //     auto q = (qo_tile_idx * cluster_tile_q + row) / gqa_group_size,
-        //          r = (qo_tile_idx * cluster_tile_q + row) % gqa_group_size;
-        //     merge_o_indices.push_back((qo_indptr_h[i] + q) * num_kv_heads * gqa_group_size + r);
-        //     // add inverse barrier idx: layout [packed_qo_len, num_kv_heads]
-        //     for (int kv_head_idx = 0; kv_head_idx < num_kv_heads; ++kv_head_idx) {
-        //       merged_barrier_idx.push_back(barrier_idx + kv_head_idx);
-        //     }
-        //   }
-        //   partial_o_nnz += row_tile_size * num_kv_tiles;
-        //   // update barriers
-        //   for (int kv_head_idx = 0; kv_head_idx < num_kv_heads; ++kv_head_idx) {
-        //     barrier_vec.push_back(num_kv_tiles);
-        //   }
-        //   barrier_idx += num_kv_heads;
-        // }
+        if (split_kv) {
+          // non-split kv is directly written through
+          for (int row = 0; row < row_tile_size; ++row) {
+            // merge_indptr.push_back(merge_indptr.back() + num_kv_tiles);
+            // output layout: [qo_len, num_kv_heads, gqa_group_size, head_dim]
+            // merge_o_indices is the indices of `gqa_group_size` dimension
+            auto q = (qo_tile_idx * cluster_tile_q + row) / gqa_group_size,
+                 r = (qo_tile_idx * cluster_tile_q + row) % gqa_group_size;
+            merge_o_indices.push_back((qo_indptr_h[i] + q) * num_kv_heads * gqa_group_size + r);
+            // add inverse barrier idx: layout [packed_qo_len, num_kv_heads]
+            for (int kv_head_idx = 0; kv_head_idx < num_kv_heads; ++kv_head_idx) {
+              merged_barrier_idx.push_back(barrier_idx + kv_head_idx);
+            }
+          }
+          partial_o_nnz += row_tile_size * num_kv_tiles;
+          // update barriers
+          for (int kv_head_idx = 0; kv_head_idx < num_kv_heads; ++kv_head_idx) {
+            barrier_vec.push_back(num_kv_tiles);
+          }
+          barrier_idx += num_kv_heads;
+        }
       }
     }
 
