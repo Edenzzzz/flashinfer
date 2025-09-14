@@ -376,6 +376,26 @@ __device__ __forceinline__ uint32_t dim4_offset(const uint32_t& dim_c, const uin
   return ((idx_d * dim_c + idx_c) * dim_b + idx_b) * dim_a + idx_a;
 }
 
+constexpr uint32_t get_num_warps_q(const uint32_t cta_tile_q) {
+  if (cta_tile_q > 16) {
+    return 4;
+  } else {
+    return 1;
+  }
+}
+
+constexpr uint32_t get_num_warps_kv(const uint32_t cta_tile_kv) {
+  return 4 / get_num_warps_q(cta_tile_kv);
+}
+
+constexpr uint32_t get_num_mma_q(const uint32_t cta_tile_q) {
+  if (cta_tile_q > 64) {
+    return 2;
+  } else {
+    return 1;
+  }
+}
+
 #define DEFINE_HAS_MEMBER(member)                                                              \
   template <typename T, typename = void>                                                       \
   struct has_##member : std::false_type {};                                                    \

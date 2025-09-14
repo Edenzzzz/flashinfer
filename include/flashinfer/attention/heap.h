@@ -38,6 +38,11 @@ class MinHeap {
     }
   }
 
+  template <typename Vec>
+  MinHeap(Vec&& elements) : heap_(std::forward<Vec>(elements)) {
+    std::make_heap(heap_.begin(), heap_.end(), compare);
+  }
+
   void insert(const Element& element) {
     heap_.push_back(element);
     std::push_heap(heap_.begin(), heap_.end(), compare);

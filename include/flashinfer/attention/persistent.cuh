@@ -284,8 +284,7 @@ struct BlockBatchPagedAttentionPersistent {
                  warp_idx * KTraits::KV_THR_LAYOUT_ROW + lane_idx / KTraits::KV_THR_LAYOUT_COL,
                  lane_idx % KTraits::KV_THR_LAYOUT_COL);
     size_t thr_local_kv_offset[NUM_MMA_KV * KTraits::KV_THR_LAYOUT_COL / 2 / KTraits::NUM_WARPS_Q];
-    int smid = 0;
-    asm volatile("mov.u32 %0, %smid;" : "=r"(smid));
+
 #pragma unroll 1
     for (IdType work_idx = work_indptr[blockIdx.y]; work_idx < work_indptr[blockIdx.y + 1];
          ++work_idx) {
@@ -298,10 +297,7 @@ struct BlockBatchPagedAttentionPersistent {
 
       const auto [q_indptr, kv_indptr, o_indptr, q_len, kv_len, packed_qo_start, kv_start, kv_end,
                   kv_head_idx, len_kv_chunk] = get_block_coord(params, work_idx);
-      if (threadIdx.x == 0 && smid == 0) {
-        printf("blockIdx.y %d work_idx %d: CTA_TILE_Q %d, kv_len %d\n", blockIdx.y, work_idx,
-               CTA_TILE_Q, kv_end - kv_start);
-      }
+
       const uint32_t kv_chunk_idx = kv_start / len_kv_chunk;
       const uint32_t num_kv_chunks = ceil_div(
           CAUSAL
@@ -540,13 +536,7 @@ struct BlockBatchReductionPersistent {
     [[maybe_unused]] constexpr uint32_t head_dim = KTraits::HEAD_DIM_VO;
     [[maybe_unused]] constexpr uint32_t num_smem_stages = KTraits::NUM_SMEM_STAGES;
     [[maybe_unused]] constexpr uint32_t vec_bits = sizeof(DTypeIn) * vec_size * 8;
-    // debug
-    __shared__ uint32_t total_index_sets;
-    if (threadIdx.x == 0) {
-      total_index_sets = 0;
-    }
-    int smid = 0;
-    asm volatile("mov.u32 %0, %smid;" : "=r"(smid));
+
     // control flow metadata
     const uint32_t warp_idx = threadIdx.x / 32;
     const uint32_t tx = (threadIdx.x % 32) % bdx, ty = (threadIdx.x % 32) / bdx;
@@ -637,18 +627,6 @@ struct BlockBatchReductionPersistent {
         s_merged[merge_idx_to_offset()] = st.get_lse();
       }
       PROFILER_EVENT_END(profiler_closure, PersistentProfileEventType::kReduction);
-      // profile log
-      const uint32_t lane_idx = threadIdx.x % 32;
-      if (lane_idx == 0 && smid == 0) {
-        atomicAdd(&total_index_sets, num_index_sets);
-        __syncwarp();
-        if (warp_idx == 0) {
-          printf("blockIdx.y %d work_idx %d: total_index_sets %d\n", blockIdx.y, i,
-                 total_index_sets);
-          total_index_sets = 0;
-        }
-        __syncwarp();
-      }
     }
   }
 };

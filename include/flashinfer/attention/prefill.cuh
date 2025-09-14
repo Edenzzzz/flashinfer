@@ -52,26 +52,6 @@ using mma::MMAMode;
 
 constexpr uint32_t WARP_SIZE = 32;
 
-constexpr uint32_t get_num_warps_q(const uint32_t cta_tile_q) {
-  if (cta_tile_q > 16) {
-    return 4;
-  } else {
-    return 1;
-  }
-}
-
-constexpr uint32_t get_num_warps_kv(const uint32_t cta_tile_kv) {
-  return 4 / get_num_warps_q(cta_tile_kv);
-}
-
-constexpr uint32_t get_num_mma_q(const uint32_t cta_tile_q) {
-  if (cta_tile_q > 64) {
-    return 2;
-  } else {
-    return 1;
-  }
-}
-
 template <uint32_t NUM_WARPS_KV, uint32_t CTA_TILE_Q, uint32_t CTA_TILE_KV, uint32_t HEAD_DIM_QK,
           uint32_t HEAD_DIM_VO, typename DTypeQ, typename DTypeKV, typename DTypeO>
 struct SharedStorageQKVO {
