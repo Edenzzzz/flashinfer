@@ -1256,10 +1256,10 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
     }
   }
   // make a new heap based on reduction costs
-  MinHeap cluster_cost_heap(std::move(cluster_cost_vec));
   for (uint32_t i = 0; i < num_clusters; ++i) {
     printf("cluster %d reduction cost = %f\n", i, cluster_cost_vec[i].second);
   }
+  MinHeap cluster_cost_heap(std::move(cluster_cost_vec));
 
   for (uint32_t task = 0; task < NUM_TASKS; ++task) {
     int cluster_tile_q = CTA_TILE_Q_SIZES[task] * cluster_size;

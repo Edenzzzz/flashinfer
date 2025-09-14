@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -38,7 +39,7 @@ class MinHeap {
     }
   }
 
-  template <typename Vec>
+  template <typename Vec, typename = std::enable_if_t<!std::is_integral_v<std::decay_t<Vec>>>>
   MinHeap(Vec&& elements) : heap_(std::forward<Vec>(elements)) {
     std::make_heap(heap_.begin(), heap_.end(), compare);
   }
