@@ -99,7 +99,7 @@ def bench_batch_decode(
         f"Batch Decode execution time: {ms}ms, Ragged prefill execution time: {ms_ragged}ms"
     )
     print(
-        f"Batch Decode memory bandwidth: {io / ms / 1024 / 1024 :.2f} GB/s, Ragged prefill memory bandwidth: {io / ms_ragged / 1024 / 1024 :.2f} GB/s"
+        f"Batch Decode memory bandwidth: {io / ms / 1024 / 1024:.2f} GB/s, Ragged prefill memory bandwidth: {io / ms_ragged / 1024 / 1024:.2f} GB/s"
     )
 
 

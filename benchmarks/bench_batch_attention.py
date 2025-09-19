@@ -7,9 +7,9 @@ from typing import List, Sequence, Tuple
 import numpy as np
 import pandas as pd
 import torch
-from triton.testing import do_bench
 
 import flashinfer
+from flashinfer.testing.utils import bench_gpu_time
 
 
 def run_bench(
@@ -23,7 +23,7 @@ def run_bench(
     device: int = 0,
     causal: bool = True,
     flipped_schedule: bool = False,
-) -> Tuple[float, float, float, float, float, float, float]:
+) -> Tuple[float, float, float, float, float]:
     seq_lens = torch.tensor(kv_lens, dtype=torch.int32)
     q_lens = torch.tensor(qo_lens, dtype=torch.int32)
     seq_lens_blocks = torch.ceil(seq_lens / page_block_size).int()
@@ -67,6 +67,8 @@ def run_bench(
         q_data_type=torch.bfloat16,
         kv_data_type=torch.bfloat16,
     )
+    measurements_old = bench_gpu_time(lambda: wrapper_old.run(q, kv_data))
+    ms_old = np.mean(measurements_old)
 
     # new
     wrapper = flashinfer.BatchAttention(kv_layout="NHD")
@@ -84,10 +86,8 @@ def run_bench(
         q_data_type=torch.bfloat16,
         kv_data_type=torch.bfloat16,
     )
-    ms_old = do_bench(lambda: wrapper_old.run(q, kv_data))
-    ms_new = do_bench(
-        lambda: wrapper.run(q, kv_data, flipped_schedule=flipped_schedule)
-    )
+    measurements_new = bench_gpu_time(lambda: wrapper.run(q, kv_data))
+    ms_new = np.mean(measurements_new)
 
     total_bytes = (
         q.numel() * q.element_size() + kv_data.numel() * kv_data.element_size()
@@ -96,7 +96,7 @@ def run_bench(
     bw_old = total_bytes / (ms_old * 1e-3) / 1024**3
     bw_new = total_bytes / (ms_new * 1e-3) / 1024**3
 
-    return ms_old, ms_new, mem_MB, bw_old, bw_new
+    return ms_old, ms_new, mem_MB, bw_old, bw_new  # type: ignore
 
 
 def synthesize_seq_len_configs() -> List[List[Tuple[int, int]]]:
@@ -105,8 +105,7 @@ def synthesize_seq_len_configs() -> List[List[Tuple[int, int]]]:
         # [(4096, 128)] * 4,  # prefill-only
         # [(600, 1)] * 122 + [(10_000, 17)] * 8,  # hybird
         # [(8192, 1)] * 127 * 2 + [(2048, 512)] * 1,  # hybrid (chunked-prefill)
-        [(8192, 1)] * 127 * 2
-        + [(8192, 4096)] * 1,  # hybrid (chunked-prefill)
+        [(8192, 1)] * 127 * 2 + [(8192, 4096)] * 1,  # hybrid (chunked-prefill)
     ]
 
     def _rand_case(bsz: int, lo: int, hi: int) -> List[Tuple[int, int]]:
@@ -140,7 +139,6 @@ def main(args: argparse.Namespace) -> None:
 
     records_old = []
     records_new = []
-    records_flipped = []
     for cfg_id, pairs in enumerate(seq_len_cfgs, start=1):
         kv_lens = [p[0] for p in pairs]
         qo_lens = [p[1] for p in pairs]
@@ -150,7 +148,6 @@ def main(args: argparse.Namespace) -> None:
             sweep["num_kv_heads"],
             sweep["num_qo_heads"],
         ):
-
             ms_old, ms_new, mem_MB, bw_old, bw_new = run_bench(
                 kv_lens,
                 qo_lens,
@@ -215,6 +212,7 @@ def main(args: argparse.Namespace) -> None:
     )
     df.to_csv(file_name, index=False)
     print(df.to_markdown(index=False, floatfmt=".2f"))
+    df.to_csv("bench_batch_attention.csv", index=False)
 
 
 if __name__ == "__main__":

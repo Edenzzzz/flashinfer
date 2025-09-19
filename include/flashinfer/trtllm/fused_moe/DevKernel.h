@@ -33,7 +33,7 @@
 
 namespace moe::dev {
 
-#define CHECK_CUDA(cmd)                                                                      \
+#define CHECK_CUDA_ERROR(cmd)                                                                \
   do {                                                                                       \
     cudaError_t e = cmd;                                                                     \
     if (e != cudaSuccess) {                                                                  \
@@ -46,36 +46,34 @@ namespace moe::dev {
 
 #define LAUNCH_ESC(...) __VA_ARGS__
 
-#define LAUNCH_PDL(data, coopLaunch, types, kernel, numBlocks, numThreads, smemSize, stream)    \
-  cudaLaunchConfig_t config{};                                                                  \
-  config.gridDim = numBlocks;                                                                   \
-  config.blockDim = numThreads;                                                                 \
-  config.dynamicSmemBytes = smemSize;                                                           \
-  config.stream = (cudaStream_t)stream;                                                         \
-                                                                                                \
-  cudaLaunchAttribute attributes[2] = {};                                                       \
-  attributes[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;                        \
-  attributes[0].val.programmaticStreamSerializationAllowed = int(data.mUsePdl);                 \
-  attributes[1].id = cudaLaunchAttributeCooperative;                                            \
-  attributes[1].val.cooperative = int(coopLaunch);                                              \
-  config.attrs = attributes;                                                                    \
-  config.numAttrs = 2;                                                                          \
-  if (data.mUsePdl) {                                                                           \
-    auto params = KernelParams<types, true>::setKernelParams(data);                             \
-    auto kernelTyped = kernel<KernelParams<types, true>>;                                       \
-    if (smemSize > 48 * 1024) {                                                                 \
-      CHECK_CUDA(cudaFuncSetAttribute(kernelTyped, cudaFuncAttributeMaxDynamicSharedMemorySize, \
-                                      smemSize));                                               \
-    }                                                                                           \
-    CHECK_CUDA(cudaLaunchKernelEx(&config, kernelTyped, params));                               \
-  } else {                                                                                      \
-    auto params = KernelParams<types, false>::setKernelParams(data);                            \
-    auto kernelTyped = kernel<KernelParams<types, false>>;                                      \
-    if (smemSize > 48 * 1024) {                                                                 \
-      CHECK_CUDA(cudaFuncSetAttribute(kernelTyped, cudaFuncAttributeMaxDynamicSharedMemorySize, \
-                                      smemSize));                                               \
-    }                                                                                           \
-    CHECK_CUDA(cudaLaunchKernelEx(&config, kernelTyped, params));                               \
+#define LAUNCH_PDL(data, coopLaunch, types, kernel, numBlocks, numThreads, smemSize, stream) \
+  cudaLaunchConfig_t config{};                                                               \
+  config.gridDim = numBlocks;                                                                \
+  config.blockDim = numThreads;                                                              \
+  config.dynamicSmemBytes = smemSize;                                                        \
+  config.stream = (cudaStream_t)stream;                                                      \
+                                                                                             \
+  cudaLaunchAttribute attributes[2] = {};                                                    \
+  attributes[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;                     \
+  attributes[0].val.programmaticStreamSerializationAllowed = int(data.mUsePdl);              \
+  attributes[1].id = cudaLaunchAttributeCooperative;                                         \
+  attributes[1].val.cooperative = int(coopLaunch);                                           \
+  config.attrs = attributes;                                                                 \
+  config.numAttrs = 2;                                                                       \
+  if (data.mUsePdl) {                                                                        \
+    auto params = KernelParams<types, true>::setKernelParams(data);                          \
+    auto kernelTyped = kernel<KernelParams<types, true>>;                                    \
+    if (smemSize > 48 * 1024)                                                                \
+      CHECK_CUDA_ERROR(cudaFuncSetAttribute(                                                 \
+          kernelTyped, cudaFuncAttributeMaxDynamicSharedMemorySize, smemSize));              \
+    CHECK_CUDA_ERROR(cudaLaunchKernelEx(&config, kernelTyped, params));                      \
+  } else {                                                                                   \
+    auto params = KernelParams<types, false>::setKernelParams(data);                         \
+    auto kernelTyped = kernel<KernelParams<types, false>>;                                   \
+    if (smemSize > 48 * 1024)                                                                \
+      CHECK_CUDA_ERROR(cudaFuncSetAttribute(                                                 \
+          kernelTyped, cudaFuncAttributeMaxDynamicSharedMemorySize, smemSize));              \
+    CHECK_CUDA_ERROR(cudaLaunchKernelEx(&config, kernelTyped, params));                      \
   }
 
 #define LAUNCH(data, kernel, numBlocks, numThreads, smemSize, stream)                              \
@@ -113,37 +111,38 @@ namespace moe::dev {
     TORCH_WARN("Unsupported pair");                                                                \
   }
 
-#define LAUNCH_ROUTING(data, coopLaunch, kernel, numBlocks, numThreads, smemSize, stream)     \
-  if (data.mDtypeExpW == tg::Dtype::Fp32) {                                                   \
-    LAUNCH_PDL(data, coopLaunch, LAUNCH_ESC(float, float), kernel, numBlocks, numThreads,     \
-               smemSize, stream);                                                             \
-  } else if (data.mDtypeExpW == tg::Dtype::Bfloat16) {                                        \
-    LAUNCH_PDL(data, coopLaunch, LAUNCH_ESC(__nv_bfloat16, __nv_bfloat16), kernel, numBlocks, \
-               numThreads, smemSize, stream);                                                 \
-  } else {                                                                                    \
-    TORCH_WARN("Unsupported dtypeExpW");                                                      \
+#define LAUNCH_ROUTING(data, coopLaunch, kernel, numBlocks, numThreads, smemSize, stream,      \
+                       NumExperts)                                                             \
+  if (data.mDtypeExpW == tg::Dtype::Fp32) {                                                    \
+    LAUNCH_PDL(data, coopLaunch, LAUNCH_ESC(float, float, NumExperts), kernel, numBlocks,      \
+               numThreads, smemSize, stream);                                                  \
+  } else if (data.mDtypeExpW == tg::Dtype::Bfloat16) {                                         \
+    LAUNCH_PDL(data, coopLaunch, LAUNCH_ESC(__nv_bfloat16, __nv_bfloat16, NumExperts), kernel, \
+               numBlocks, numThreads, smemSize, stream);                                       \
+  } else {                                                                                     \
+    TORCH_WARN("Unsupported dtypeExpW");                                                       \
   }
 
 #define LAUNCH_ROUTING_WITH_EXTRA_FLAG(data, coopLaunch, kernel, numBlocks, numThreads, smemSize, \
-                                       stream, extraFlag, forceFloatInput)                        \
+                                       stream, extraFlag, forceFloatInput, NumExperts)            \
   if (data.mDtypeExpW == tg::Dtype::Fp32 && extraFlag) {                                          \
-    LAUNCH_PDL(data, coopLaunch, LAUNCH_ESC(float, float, true), kernel, numBlocks, numThreads,   \
-               smemSize, stream);                                                                 \
+    LAUNCH_PDL(data, coopLaunch, LAUNCH_ESC(float, float, true, NumExperts), kernel, numBlocks,   \
+               numThreads, smemSize, stream);                                                     \
   } else if (data.mDtypeExpW == tg::Dtype::Fp32) {                                                \
-    LAUNCH_PDL(data, coopLaunch, LAUNCH_ESC(float, float, false), kernel, numBlocks, numThreads,  \
-               smemSize, stream);                                                                 \
+    LAUNCH_PDL(data, coopLaunch, LAUNCH_ESC(float, float, false, NumExperts), kernel, numBlocks,  \
+               numThreads, smemSize, stream);                                                     \
   } else if (data.mDtypeExpW == tg::Dtype::Bfloat16 && extraFlag && forceFloatInput) {            \
-    LAUNCH_PDL(data, coopLaunch, LAUNCH_ESC(float, __nv_bfloat16, true), kernel, numBlocks,       \
-               numThreads, smemSize, stream);                                                     \
+    LAUNCH_PDL(data, coopLaunch, LAUNCH_ESC(float, __nv_bfloat16, true, NumExperts), kernel,      \
+               numBlocks, numThreads, smemSize, stream);                                          \
   } else if (data.mDtypeExpW == tg::Dtype::Bfloat16 && extraFlag) {                               \
-    LAUNCH_PDL(data, coopLaunch, LAUNCH_ESC(__nv_bfloat16, __nv_bfloat16, true), kernel,          \
-               numBlocks, numThreads, smemSize, stream);                                          \
+    LAUNCH_PDL(data, coopLaunch, LAUNCH_ESC(__nv_bfloat16, __nv_bfloat16, true, NumExperts),      \
+               kernel, numBlocks, numThreads, smemSize, stream);                                  \
   } else if (data.mDtypeExpW == tg::Dtype::Bfloat16 && forceFloatInput) {                         \
-    LAUNCH_PDL(data, coopLaunch, LAUNCH_ESC(float, __nv_bfloat16, false), kernel, numBlocks,      \
-               numThreads, smemSize, stream);                                                     \
-  } else if (data.mDtypeExpW == tg::Dtype::Bfloat16) {                                            \
-    LAUNCH_PDL(data, coopLaunch, LAUNCH_ESC(__nv_bfloat16, __nv_bfloat16, false), kernel,         \
+    LAUNCH_PDL(data, coopLaunch, LAUNCH_ESC(float, __nv_bfloat16, false, NumExperts), kernel,     \
                numBlocks, numThreads, smemSize, stream);                                          \
+  } else if (data.mDtypeExpW == tg::Dtype::Bfloat16) {                                            \
+    LAUNCH_PDL(data, coopLaunch, LAUNCH_ESC(__nv_bfloat16, __nv_bfloat16, false, NumExperts),     \
+               kernel, numBlocks, numThreads, smemSize, stream);                                  \
   } else {                                                                                        \
     TORCH_WARN("Unsupported dtypeExpW");                                                          \
   }
@@ -361,7 +360,10 @@ struct Data {
   int32_t numTokens;
   int32_t numExperts;
   int32_t topK;
+  // Hidden dimension output of MoE block. It is not padded.
   int32_t hiddenDim;
+  // Hidden dimension output of FC2. It might be padded.
+  int32_t hiddenDimPadded;
   int32_t const* totalNumPaddedTokens;
 };
 
@@ -381,6 +383,7 @@ struct KernelParams {
   int32_t* expandedIdxToPermutedIdx;
 
   int32_t hiddenDim;
+  int32_t hiddenDimPadded;
   int32_t numTokens;
   int32_t numExperts;
   int32_t topK;
@@ -398,6 +401,7 @@ struct KernelParams {
     params.expandedIdxToPermutedIdx = data.expandedIdxToPermutedIdx;
 
     params.hiddenDim = data.hiddenDim;
+    params.hiddenDimPadded = data.hiddenDimPadded;
     params.numTokens = data.numTokens;
     params.numExperts = data.numExperts;
     params.topK = data.topK;
