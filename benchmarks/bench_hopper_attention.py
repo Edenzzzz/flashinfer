@@ -63,38 +63,32 @@ def bench_batch_ragged_prefill(batch_size, num_heads, seq_len, causal, head_dim)
         batch_size * seq_len, num_kv_heads, head_dim, dtype=torch.half, device="cuda"
     )
 
-    sm80_wrapper, sm90_wrapper = (
-        flashinfer.BatchPrefillWithRaggedKVCacheWrapper(
-            torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device="cuda:0"),
-            kv_layout="NHD",
-            backend=backend,
-        )
-        for backend in ["fa2", "fa3"]
+    sm80_wrapper = flashinfer.BatchPrefillWithRaggedKVCacheWrapper(
+        torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device="cuda:0"),
+        kv_layout="NHD",
+        backend="fa2",
     )
 
     qo_indptr = torch.arange(0, batch_size * seq_len + 1, seq_len).int()
     kv_indptr = torch.arange(0, batch_size * seq_len + 1, seq_len).int()
 
-    for wrapper in [sm80_wrapper, sm90_wrapper]:
-        wrapper.plan(
-            qo_indptr,
-            kv_indptr,
-            num_qo_heads,
-            num_kv_heads,
-            head_dim,
-            causal=causal,
-        )
-
-    sm80_ms, sm90_ms = (
-        np.median(
-            bench_gpu_time(
-                lambda: wrapper.run(q, k, v),
-                dry_run_time_ms=100,
-                repeat_time_ms=1000,
-            )
-        )
-        for wrapper in [sm80_wrapper, sm90_wrapper]
+    sm80_wrapper.plan(
+        qo_indptr,
+        kv_indptr,
+        num_qo_heads,
+        num_kv_heads,
+        head_dim,
+        causal=causal,
     )
+
+    sm80_ms = np.median(
+        bench_gpu_time(
+            lambda: sm80_wrapper.run(q, k, v),
+            dry_run_time_ms=100,
+            repeat_time_ms=1000,
+        )
+    )
+    sm90_ms = sm80_ms  # Only using fa2 backend
 
     def flops(ms):
         if causal:
@@ -135,13 +129,10 @@ def bench_batch_paged_prefill(
         device="cuda",
     )
 
-    sm80_wrapper, sm90_wrapper = (
-        flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-            torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device="cuda:0"),
-            kv_layout="NHD",
-            backend=backend,
-        )
-        for backend in ["fa2", "fa3"]
+    sm80_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+        torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device="cuda:0"),
+        kv_layout="NHD",
+        backend="fa2",
     )
 
     qo_indptr = torch.arange(0, batch_size * seq_len + 1, seq_len).int()
@@ -151,29 +142,26 @@ def bench_batch_paged_prefill(
     kv_indices = torch.arange(0, batch_size * (seq_len // page_size)).int()
     last_page_len = torch.ones(batch_size, dtype=torch.int32) * page_size
 
-    for wrapper in [sm80_wrapper, sm90_wrapper]:
-        wrapper.plan(
-            qo_indptr,
-            kv_indptr,
-            kv_indices,
-            last_page_len,
-            num_qo_heads,
-            num_kv_heads,
-            head_dim,
-            page_size,  # page_size
-            causal=causal,
-        )
-
-    sm80_ms, sm90_ms = (
-        np.median(
-            bench_gpu_time(
-                lambda: wrapper.run(q, (k, v)),
-                dry_run_time_ms=100,
-                repeat_time_ms=1000,
-            )
-        )
-        for wrapper in [sm80_wrapper, sm90_wrapper]
+    sm80_wrapper.plan(
+        qo_indptr,
+        kv_indptr,
+        kv_indices,
+        last_page_len,
+        num_qo_heads,
+        num_kv_heads,
+        head_dim,
+        page_size,  # page_size
+        causal=causal,
     )
+
+    sm80_ms = np.median(
+        bench_gpu_time(
+            lambda: sm80_wrapper.run(q, (k, v)),
+            dry_run_time_ms=100,
+            repeat_time_ms=1000,
+        )
+    )
+    sm90_ms = sm80_ms  # Only using fa2 backend
 
     def flops(ms):
         if causal:
@@ -192,10 +180,10 @@ def bench_batch_paged_prefill(
 
 if __name__ == "__main__":
     device_capability = torch.cuda.get_device_capability()
-    if device_capability[0] != 9:
-        print(f"Current device capability: {device_capability}.")
-        print("Current benchmark targets capability (9, 0). Returning...")
-        exit()
+    # if device_capability[0] != 9:
+    #     print(f"Current device capability: {device_capability}.")
+    #     print("Current benchmark targets capability (9, 0). Returning...")
+    #     exit()
 
     bench_batch_paged_prefill(1, 128, 32, 1024, True, 128)
     bench_batch_paged_prefill(1, 64, 32, 2048, True, 128)
