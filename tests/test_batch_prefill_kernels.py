@@ -117,7 +117,7 @@ def test_batch_prefill_with_paged_kv_cache(
         (batch_size,), (kv_len - 1) % page_size + 1, dtype=torch.int32
     )
 
-    workspace_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.int8, device="cuda:0")
+    workspace_buffer = torch.zeros(256 * 1024 * 1024, dtype=torch.int8, device="cuda:0")
     if not use_cuda_graph:
         q_indptr_gpu = q_indptr_cpu.to(0)
         kv_indptr_gpu = kv_indptr_cpu.to(0)
@@ -145,20 +145,20 @@ def test_batch_prefill_with_paged_kv_cache(
             o = wrapper.run(q, kv_data)
 
         # test with pre-allocated output
-        o_buffer = torch.empty_like(o)
+        o_buffer = torch.zeros_like(o)
         wrapper.run(q, kv_data, out=o_buffer)
         torch.testing.assert_close(o, o_buffer, rtol=1e-3, atol=1e-3)
     else:
-        q_indptr_buffer = torch.empty(
+        q_indptr_buffer = torch.zeros(
             batch_size + 1, device="cuda:0", dtype=torch.int32
         )
-        kv_indptr_buffer = torch.empty(
+        kv_indptr_buffer = torch.zeros(
             batch_size + 1, device="cuda:0", dtype=torch.int32
         )
-        kv_indices_buffer = torch.empty(
+        kv_indices_buffer = torch.zeros(
             total_num_pages, device="cuda:0", dtype=torch.int32
         )
-        kv_last_page_len_buffer = torch.empty(
+        kv_last_page_len_buffer = torch.zeros(
             batch_size, device="cuda:0", dtype=torch.int32
         )
         wrapper = flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(
@@ -361,7 +361,7 @@ def test_batch_prefill_with_tuple_paged_kv_cache(
         (batch_size,), (kv_len - 1) % page_size + 1, dtype=torch.int32
     )
 
-    workspace_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.int8, device="cuda:0")
+    workspace_buffer = torch.zeros(256 * 1024 * 1024, dtype=torch.int8, device="cuda:0")
     if not use_cuda_graph:
         q_indptr_gpu = q_indptr_cpu.to(0)
         kv_indptr_gpu = kv_indptr_cpu.to(0)
@@ -388,16 +388,16 @@ def test_batch_prefill_with_tuple_paged_kv_cache(
         else:
             o = wrapper.run(q, kv_data)
     else:
-        q_indptr_buffer = torch.empty(
+        q_indptr_buffer = torch.zeros(
             batch_size + 1, device="cuda:0", dtype=torch.int32
         )
-        kv_indptr_buffer = torch.empty(
+        kv_indptr_buffer = torch.zeros(
             batch_size + 1, device="cuda:0", dtype=torch.int32
         )
-        kv_indices_buffer = torch.empty(
+        kv_indices_buffer = torch.zeros(
             total_num_pages, device="cuda:0", dtype=torch.int32
         )
-        kv_last_page_len_buffer = torch.empty(
+        kv_last_page_len_buffer = torch.zeros(
             batch_size, device="cuda:0", dtype=torch.int32
         )
         wrapper = flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(
@@ -578,7 +578,7 @@ def test_batch_prefill_with_paged_kv_cache_custom_mask(
         (batch_size,), (kv_len - 1) % page_size + 1, dtype=torch.int32, device="cuda:0"
     )
 
-    workspace_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.int8, device="cuda:0")
+    workspace_buffer = torch.zeros(256 * 1024 * 1024, dtype=torch.int8, device="cuda:0")
     wrapper = flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(
         workspace_buffer, kv_layout
     )
@@ -681,7 +681,7 @@ def test_batch_prefill_with_ragged_kv_cache(
         torch.arange(0, batch_size + 1, device="cuda:0", dtype=torch.int32) * kv_len
     )
 
-    workspace_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.int8, device="cuda:0")
+    workspace_buffer = torch.zeros(256 * 1024 * 1024, dtype=torch.int8, device="cuda:0")
     wrapper = flashinfer.prefill.BatchPrefillWithRaggedKVCacheWrapper(
         workspace_buffer, kv_layout
     )
@@ -763,7 +763,7 @@ def test_batch_prefill_with_ragged_kv_cache_custom_mask(
         torch.arange(0, batch_size + 1, device="cuda:0", dtype=torch.int32) * kv_len
     )
 
-    workspace_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.int8, device="cuda:0")
+    workspace_buffer = torch.zeros(256 * 1024 * 1024, dtype=torch.int8, device="cuda:0")
     wrapper = flashinfer.prefill.BatchPrefillWithRaggedKVCacheWrapper(
         workspace_buffer, kv_layout
     )
@@ -859,7 +859,7 @@ def test_batch_prefill_with_paged_kv_cache_multi_item_scoring(
         (batch_size,), (kv_len - 1) % page_size + 1, dtype=torch.int32
     )
 
-    workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8).to(0)
+    workspace_buffer = torch.zeros(128 * 1024 * 1024, dtype=torch.int8).to(0)
     q_indptr_gpu = q_indptr_cpu.to(0)
     kv_indptr_gpu = kv_indptr_cpu.to(0)
     kv_indices_gpu = kv_indices_cpu.to(0)

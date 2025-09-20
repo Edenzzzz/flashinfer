@@ -492,6 +492,16 @@ inline cudaError_t DecodePlan(void* float_buffer, size_t float_workspace_size_in
   return cudaSuccess;
 }
 
+inline int packed_causal_kv_end(int qo_len, int kv_len, int qo_tile_idx, int cluster_tile_q,
+                                int num_qo_tiles, int group_size) {
+  if (qo_tile_idx + 1 == num_qo_tiles) {
+    return kv_len;
+  }
+  int kv_len_init = kv_len - qo_len;  // right aligned
+  return max(min(kv_len_init + ceil_div((qo_tile_idx + 1) * cluster_tile_q, group_size), kv_len),
+             0);
+}
+
 template <typename IdType>
 inline auto PrefillSplitQOKVIndptr(IdType* qo_indptr_h, IdType* kv_indptr_h,
                                    uint32_t total_num_rows, uint32_t batch_size,
@@ -576,14 +586,19 @@ inline auto PrefillSplitQOKVIndptr(IdType* qo_indptr_h, IdType* kv_indptr_h,
   }
   // step 3: split qo_indptr and kv_indptr
   uint32_t new_batch_size = 0;
+  int64_t num_chunks_kv = 0;
   for (uint32_t request_idx = 0; request_idx < batch_size; ++request_idx) {
     const int64_t packed_qo_len = packed_qo_len_arr[request_idx];
     const int64_t num_tiles_q = ceil_div(packed_qo_len, cta_tile_q);
-    const int64_t kv_len = std::max(int(effective_kv_len_arr[request_idx]), 1);
+    int64_t kv_len = std::max(int(effective_kv_len_arr[request_idx]), 1);
+    int64_t max_num_chunks_kv = 0;
     for (uint32_t q_tile_idx = 0; q_tile_idx < num_tiles_q; ++q_tile_idx) {
-      kv_len = packed_causal_kv_end(packed_qo_len, kv_len, q_tile_idx, cta_tile_q, num_tiles_q,
-                                    gqa_group_size);
-      const int64_t num_chunks_kv = disable_split_kv ? 1 : ceil_div(kv_len, kv_chunk_size);
+      if (!window_left) {
+        kv_len = packed_causal_kv_end(packed_qo_len, kv_len, q_tile_idx, cta_tile_q, num_tiles_q,
+                                      gqa_group_size);
+      }
+      num_chunks_kv = disable_split_kv ? 1 : ceil_div(kv_len, kv_chunk_size);
+      max_num_chunks_kv = std::max(max_num_chunks_kv, num_chunks_kv);
       if (fixed_split_size > 0 && !disable_split_kv) {
         split_kv = split_kv || num_chunks_kv > 1;
       }
@@ -597,9 +612,18 @@ inline auto PrefillSplitQOKVIndptr(IdType* qo_indptr_h, IdType* kv_indptr_h,
 
     int64_t qo_len = packed_qo_len / gqa_group_size;
     for (uint32_t row = 0; row < qo_len; ++row) {
+      if (!window_left) {
+        uint32_t q_tile_idx = ceil_div(row * gqa_group_size, cta_tile_q);
+        int kv_len = packed_causal_kv_end(qo_len, kv_len, q_tile_idx, cta_tile_q, num_tiles_q,
+                                          gqa_group_size);
+        num_chunks_kv = disable_split_kv ? 1 : ceil_div(kv_len, kv_chunk_size);
+      } else {
+        num_chunks_kv = max_num_chunks_kv;
+      }
+
       merge_indptr.push_back(merge_indptr.back() + num_chunks_kv);
     }
-    o_indptr.push_back(o_indptr.back() + qo_len * num_chunks_kv);
+    o_indptr.push_back(o_indptr.back() + qo_len * max_num_chunks_kv);
   }
 
   const size_t padded_batch_size =
@@ -806,16 +830,6 @@ std::vector<T> flatten(const std::vector<std::vector<T>>& vec, int size_after_fl
     result.insert(result.end(), inner_vec.begin(), inner_vec.end());
   }
   return result;
-}
-
-inline int packed_causal_kv_end(int qo_len, int kv_len, int qo_tile_idx, int cluster_tile_q,
-                                int num_qo_tiles, int group_size) {
-  if (qo_tile_idx + 1 == num_qo_tiles) {
-    return kv_len;
-  }
-  int kv_len_init = kv_len - qo_len;  // right aligned
-  return max(min(kv_len_init + ceil_div((qo_tile_idx + 1) * cluster_tile_q, group_size), kv_len),
-             0);
 }
 
 struct PrefillPlanSM90Info {
