@@ -580,11 +580,13 @@ inline auto PrefillSplitQOKVIndptr(IdType* qo_indptr_h, IdType* kv_indptr_h,
     const int64_t packed_qo_len = packed_qo_len_arr[request_idx];
     const int64_t num_tiles_q = ceil_div(packed_qo_len, cta_tile_q);
     const int64_t kv_len = std::max(int(effective_kv_len_arr[request_idx]), 1);
-    const int64_t num_chunks_kv = disable_split_kv ? 1 : ceil_div(kv_len, kv_chunk_size);
-    if (fixed_split_size > 0 && !disable_split_kv) {
-      split_kv = split_kv || num_chunks_kv > 1;
-    }
     for (uint32_t q_tile_idx = 0; q_tile_idx < num_tiles_q; ++q_tile_idx) {
+      kv_len = packed_causal_kv_end(packed_qo_len, kv_len, q_tile_idx, cta_tile_q, num_tiles_q,
+                                    gqa_group_size);
+      const int64_t num_chunks_kv = disable_split_kv ? 1 : ceil_div(kv_len, kv_chunk_size);
+      if (fixed_split_size > 0 && !disable_split_kv) {
+        split_kv = split_kv || num_chunks_kv > 1;
+      }
       for (uint32_t kv_tile_idx = 0; kv_tile_idx < num_chunks_kv; ++kv_tile_idx) {
         new_batch_size += 1;
         request_indices.push_back(request_idx);
