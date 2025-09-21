@@ -86,7 +86,9 @@ def run_bench(
         q_data_type=torch.bfloat16,
         kv_data_type=torch.bfloat16,
     )
-    measurements_new = bench_gpu_time(lambda: wrapper.run(q, kv_data))
+    measurements_new = bench_gpu_time(
+        lambda: wrapper.run(q, kv_data, flipped_schedule=flipped_schedule)
+    )
     ms_new = np.mean(measurements_new)
 
     total_bytes = (
