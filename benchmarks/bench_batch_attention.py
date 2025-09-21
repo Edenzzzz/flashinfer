@@ -214,7 +214,6 @@ def main(args: argparse.Namespace) -> None:
     )
     df.to_csv(file_name, index=False)
     print(df.to_markdown(index=False, floatfmt=".2f"))
-    df.to_csv("bench_batch_attention.csv", index=False)
 
 
 if __name__ == "__main__":
