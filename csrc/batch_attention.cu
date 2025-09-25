@@ -74,7 +74,6 @@ void BatchPagedAttentionRun(at::Tensor float_workspace_buffer, at::Tensor int_wo
                             bool flipped_schedule ADDITIONAL_FUNC_PARAMS PROFILER_FUNC_PARAMS) {
   HolisticPlanInfo<2> plan_info;
   plan_info.FromVector(tensor_to_vec(plan_info_vec));
-
   auto device = q.device();
 
   void* float_buffer_ptr = float_workspace_buffer.data_ptr();

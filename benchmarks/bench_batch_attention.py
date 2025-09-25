@@ -133,10 +133,13 @@ def main(args: argparse.Namespace) -> None:
     seq_len_cfgs = synthesize_seq_len_configs()
 
     sweep = {
-        "page_block_size": (1, 8, 16),
-        "head_dim": (64, 128),
-        "num_kv_heads": (4,),
-        "num_qo_heads": (28,),
+        "page_block_size": (1,),  # (1, 8, 16),
+        "head_dim": (
+            64,
+            128,
+        ),  # (64, 128),
+        "num_kv_heads": (8,),
+        "num_qo_heads": (32, 64),
     }
 
     records_old = []

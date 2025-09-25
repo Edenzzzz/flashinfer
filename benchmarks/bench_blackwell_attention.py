@@ -82,6 +82,7 @@ def bench_fmha_blackwell(
 
 if __name__ == "__main__":
     bench_fmha_blackwell(128, 512, 32, 128, False, torch.bfloat16)
+    bench_fmha_blackwell(128, 512, 32, 128, False, torch.bfloat16)
     bench_fmha_blackwell(64, 1024, 32, 128, False, torch.bfloat16)
     bench_fmha_blackwell(32, 2048, 32, 128, False, torch.bfloat16)
     bench_fmha_blackwell(16, 4096, 32, 128, False, torch.bfloat16)

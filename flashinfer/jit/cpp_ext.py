@@ -111,7 +111,7 @@ def generate_ninja_build_for_op(
         for extra_dir in extra_include_dirs:
             common_cflags.append(f"-I{extra_dir.resolve()}")
     for sys_dir in system_includes:
-        common_cflags.append(f"-isystem {sys_dir}")
+        common_cflags.append(f"-I {sys_dir}")
 
     cflags = [
         "$common_cflags",

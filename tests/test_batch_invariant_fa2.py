@@ -309,3 +309,62 @@ def test_batch_prefill_tensor_cores(
     assert torch.equal(
         lse_tensor_cores[: invariant_bs * qo_len], lse_tensor_cores_invariant
     )
+
+    # Test chunked prefill with 1024 chunk size using invariant batch size
+    chunk_size = 1024
+    chunked_outputs = []
+    chunked_lses = []
+
+    for chunk_start in range(0, qo_len, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, qo_len)
+        current_chunk_size = chunk_end - chunk_start
+
+        # Create chunked q_indptr for invariant batch size
+        q_indptr_chunk = (
+            torch.arange(0, invariant_bs + 1, device="cuda:0", dtype=torch.int32)
+            * current_chunk_size
+        )
+
+        # Extract chunked q data for invariant batch size
+        q_chunk = torch.empty(
+            invariant_bs * current_chunk_size,
+            num_qo_heads,
+            head_dim,
+            device="cuda:0",
+            dtype=torch.float16,
+        )
+        for i in range(invariant_bs):
+            start_idx = i * qo_len + chunk_start
+            end_idx = i * qo_len + chunk_end
+            chunk_start_idx = i * current_chunk_size
+            chunk_end_idx = (i + 1) * current_chunk_size
+            q_chunk[chunk_start_idx:chunk_end_idx] = q[start_idx:end_idx]
+
+        # Plan and run for this chunk using invariant batch size
+        wrapper_tensor_cores.plan(
+            q_indptr_chunk,
+            kv_indptr_invariant,
+            kv_indices,
+            kv_last_page_len_invariant,
+            num_qo_heads,
+            num_kv_heads,
+            head_dim,
+            page_size,
+            pos_encoding_mode=pos_encoding_mode,
+            q_data_type=torch.float16,
+            kv_data_type=torch.float16,
+            fixed_split_size=fixed_split_size if not disable_split_kv else None,
+            disable_split_kv=disable_split_kv,
+        )
+        o_chunk, lse_chunk = wrapper_tensor_cores.run(q_chunk, kv_data, return_lse=True)
+
+        chunked_outputs.append(o_chunk)
+        chunked_lses.append(lse_chunk)
+
+    # Concatenate all chunked results
+    o_chunked = torch.cat(chunked_outputs, dim=0)
+    lse_chunked = torch.cat(chunked_lses, dim=0)
+
+    # Compare chunked results with invariant results
+    assert torch.equal(o_tensor_cores_invariant, o_chunked)
+    assert torch.equal(lse_tensor_cores_invariant, lse_chunked)
