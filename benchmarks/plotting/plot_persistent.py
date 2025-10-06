@@ -29,7 +29,8 @@ for repeat in repeats:
     batch_prefill_values = []
     persistent_original_values = []
     decode_prefill_values = []
-
+    decode_len = df_all["decode_len"].unique()[0] // 1024
+    prefill_chunk_size = df_all["prefill_chunk_size"].unique()[0] // 1024
     for case in [str(preferred_case)]:
         # Compute averages for this specific repeat count
         persistent_flipped_avg = df_all[
@@ -100,9 +101,9 @@ for repeat in repeats:
 
     plt.xlabel("Case Type")
     plt.ylabel("Average Bandwidth (GB/s)")
-    plt.title(f"Average Bandwidth Comparison ({selected_case_label}, {repeat} repeats)")
+    plt.title(f"Average Bandwidth ({selected_case_label}, {repeat} repeats, {prefill_chunk_size}k prefill, {decode_len}k decode)")
     plt.xticks(x, case_names)
-    plt.legend()
+    plt.legend(fontsize=8, ncol=2)
 
     # Add value labels on bars
     def add_value_labels(bars):
@@ -126,6 +127,6 @@ for repeat in repeats:
 
     plt.tight_layout()
     plt.savefig(
-        f"persistent_comparison_{repeat}_repeats.png", dpi=300, bbox_inches="tight"
+        f"persistent_comparison_{repeat}_repeats_{prefill_chunk_size}k_prefill_{decode_len}k_decode.png", dpi=300, bbox_inches="tight"
     )
     plt.show()
