@@ -30,8 +30,8 @@ void BatchPagedAttentionRun(Tensor float_workspace_buffer, Tensor int_workspace_
                             Tensor kv_indices, Tensor o, Optional<Tensor> maybe_lse,
                             int64_t mask_mode_code, int64_t layout_code, int64_t num_qo_heads,
                             int64_t num_kv_heads, int64_t page_size, double v_scale,
-                            double sm_scale,
-                            double logits_soft_cap ADDITIONAL_FUNC_PARAMS PROFILER_FUNC_PARAMS);
+                            double sm_scale, double logits_soft_cap,
+                            bool flipped_schedule ADDITIONAL_FUNC_PARAMS PROFILER_FUNC_PARAMS);
 
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(plan, &BatchPagedAttentionPlan);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(run, &BatchPagedAttentionRun);

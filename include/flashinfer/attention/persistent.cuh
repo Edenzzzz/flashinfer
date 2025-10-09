@@ -521,8 +521,9 @@ struct BlockBatchReductionPersistent {
     // v_merged: [qo_len, num_kv_heads, gqa_group_size, head_dim]
 #pragma unroll 1
     for (uint32_t i = worker_id; i < num_packed_qo_len * num_kv_heads; i += num_workers) {
-      PROFILER_EVENT_START(profiler_closure, PersistentProfileEventType::kReduction);
       __syncwarp();  // avoid data hazard due to reordering st.cast_store
+      PROFILER_EVENT_START(profiler_closure, PersistentProfileEventType::kReduction);
+
       // remap workload
       uint32_t packed_qo_idx = i / num_kv_heads;
       uint32_t kv_head_idx = i % num_kv_heads;
@@ -598,7 +599,7 @@ template <uint32_t CTA_TILE_Q_1, uint32_t CTA_TILE_Q_2, uint32_t HEAD_DIM_QK, ui
           MaskMode MASK_MODE, typename AttentionVariant, typename Params>
 cudaError_t BatchPagedAttentionPersistent(const Params params_1, const Params params_2,
                                           const uint32_t num_blks_x, const uint32_t num_blks_y,
-                                          const cudaStream_t stream) {
+                                          const bool flipped_schedule, const cudaStream_t stream) {
   using DTypeQ = typename Params::DTypeQ;
   using DTypeKV = typename Params::DTypeKV;
   using DTypeO = typename Params::DTypeO;
@@ -628,7 +629,6 @@ cudaError_t BatchPagedAttentionPersistent(const Params params_1, const Params pa
   size_t smem_size =
       max(sizeof(typename KTraits1::SharedStorage), sizeof(typename KTraits2::SharedStorage));
   smem_size = max(smem_size, ReductionKTraits::SMEM_SIZE);
-
   // Launch persistent kernel
   auto kernel = PersistentKernelTemplate<BlockBatchPagedAttentionPersistent<KTraits1, Params>,
                                          BlockBatchPagedAttentionPersistent<KTraits2, Params>,
@@ -637,7 +637,23 @@ cudaError_t BatchPagedAttentionPersistent(const Params params_1, const Params pa
       cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
   dim3 nblks(num_blks_x, num_blks_y);
   dim3 nthrs(NUM_THREADS);
-  void* args[] = {(void*)&params_1, (void*)&params_2};
+
+  // CTA counter for prefill-decode overlap
+  int num_sm = 0;
+  int num_ctas_per_sm = 0;
+  static int* cta_counter = nullptr;
+  if (flipped_schedule) {
+    FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&num_sm, cudaDevAttrMultiProcessorCount, 0));
+    FLASHINFER_CUDA_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&num_ctas_per_sm, kernel,
+                                                                       NUM_THREADS, smem_size));
+    FLASHINFER_CUDA_CALL(
+        cudaMallocAsync(&cta_counter, sizeof(int) * num_sm * num_ctas_per_sm, stream));
+    FLASHINFER_CUDA_CALL(
+        cudaMemsetAsync(cta_counter, 0, sizeof(int) * num_sm * num_ctas_per_sm, stream));
+  }
+
+  void* args[] = {(void*)&params_1, (void*)&params_2, (void*)&cta_counter};
+
   FLASHINFER_CUDA_CALL(
       cudaLaunchCooperativeKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
   return cudaSuccess;

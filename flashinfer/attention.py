@@ -142,6 +142,7 @@ class BatchAttention:
         v_scale: Optional[torch.Tensor] = None,
         logits_soft_cap: float = 0.0,
         profiler_buffer: Optional[torch.Tensor] = None,
+        flipped_schedule: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if profiler_buffer is None:
             if self._use_profiler:
@@ -155,7 +156,7 @@ class BatchAttention:
 
         k_cache, v_cache = _unpack_paged_kv_cache(kv_cache, self._kv_layout)
         if out is None:
-            out = torch.empty_like(q)
+            out = torch.empty(q.shape, dtype=q.dtype, device=q.device)
         if lse is None:
             # lse shape: [batch_size, num_qo_heads]
             lse = torch.empty(
@@ -190,6 +191,7 @@ class BatchAttention:
             v_scale,
             sm_scale,
             logits_soft_cap,
+            flipped_schedule,
             # ADDITIONAL_FUNC_PARAMS
             # PROFILER_FUNC_PARAMS
             *profiler_args,

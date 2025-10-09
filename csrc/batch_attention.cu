@@ -30,7 +30,7 @@ template <uint32_t CTA_TILE_Q_1, uint32_t CTA_TILE_Q_2, uint32_t HEAD_DIM_QK, ui
           MaskMode MASK_MODE, typename AttentionVariant, typename Params>
 cudaError_t BatchPagedAttentionPersistent(const Params params_1, const Params params_2,
                                           const uint32_t num_blks_x, const uint32_t num_blks_y,
-                                          const cudaStream_t stream);
+                                          const bool flipped_schedule, const cudaStream_t stream);
 }  // namespace flashinfer
 
 using namespace flashinfer;
@@ -69,8 +69,8 @@ void BatchPagedAttentionRun(Tensor float_workspace_buffer, Tensor int_workspace_
                             int64_t mask_mode_code, int64_t layout_code, int64_t num_qo_heads,
                             int64_t num_kv_heads, int64_t page_size,
                             double v_scale,  // must use double due to pytorch binding
-                            double sm_scale,
-                            double logits_soft_cap ADDITIONAL_FUNC_PARAMS PROFILER_FUNC_PARAMS) {
+                            double sm_scale, double logits_soft_cap,
+                            bool flipped_schedule ADDITIONAL_FUNC_PARAMS PROFILER_FUNC_PARAMS) {
   HolisticPlanInfo<2> plan_info;
   plan_info.FromVector(std::vector<int64_t>(plan_info_vec.begin(), plan_info_vec.end()));
 
@@ -177,7 +177,8 @@ void BatchPagedAttentionRun(Tensor float_workspace_buffer, Tensor int_workspace_
 
         cudaError_t status = BatchPagedAttentionPersistent<128, 16, HEAD_DIM_QK, HEAD_DIM_VO,
                                                            MASK_MODE, AttentionVariant>(
-            params[0], params[1], plan_info.num_blks_x, plan_info.num_blks_y, stream);
+            params[0], params[1], plan_info.num_blks_x, plan_info.num_blks_y, flipped_schedule,
+            stream);
         TVM_FFI_ICHECK(status == cudaSuccess)
             << "Failed to run persistent paged attention, error: " << cudaGetErrorString(status);
         return true;
