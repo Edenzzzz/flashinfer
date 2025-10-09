@@ -72,6 +72,24 @@ def run_bench(
     measurements = bench_gpu_time(lambda: wrapper_old.run(q, kv_data))
     ms_old = np.median(measurements)
 
+    wrapper_persistent = flashinfer.BatchAttention(kv_layout="NHD")
+    wrapper_persistent.plan(
+        q_indptr.to(device),
+        kv_indptr.to(device),
+        torch.arange(num_blocks, dtype=torch.int32, device=device),
+        seq_lens.to(device),
+        num_qo_heads,
+        num_kv_heads,
+        head_dim,
+        head_dim,
+        page_block_size,
+        causal=causal,
+        q_data_type=torch.bfloat16,
+        kv_data_type=torch.bfloat16,
+    )
+    o_persistent, _ = wrapper_persistent.run(q, kv_data)
+    measurements_persistent = bench_gpu_time(lambda: wrapper_persistent.run(q, kv_data))
+    ms_persistent = np.mean(measurements_persistent)
     if len(p_kv_lens) == 1:
         q_d = q[: d_q_indptr[-1]]
         kv_d = kv_data[: d_kv_indptr[-1]].unbind(1)
@@ -126,6 +144,7 @@ def run_bench(
     print(f"Elapsed time (Batched Prefill): {ms_old:.2f} ms")
     if len(p_kv_lens) == 1:
         print(f"Elapsed time (POD Attention): {ms_pod:.2f} ms")
+    print(f"Elapsed time (Persistent BatchAttention): {ms_persistent:.2f} ms")
     total_bytes = (
         q.numel() * q.element_size() + kv_data.numel() * kv_data.element_size()
     )
@@ -137,6 +156,10 @@ def run_bench(
     if len(p_kv_lens) == 1:
         bandwidth_pod_gb_s = total_bytes / (ms_pod * 1e-3) / (1024**3)
         print(f"Memory bandwidth (POD Attention): {bandwidth_pod_gb_s:.2f} GB/s")
+    bandwidth_persistent_gb_s = total_bytes / (ms_persistent * 1e-3) / (1024**3)
+    print(
+        f"Memory bandwidth (Persistent BatchAttention): {bandwidth_persistent_gb_s:.2f} GB/s"
+    )
 
 
 if __name__ == "__main__":
@@ -150,60 +173,60 @@ if __name__ == "__main__":
     p_kv_configs = [[10000] * 1, [10000], [8192] * 1, []]
 
     # construct random length testcases
-    for _ in range(1):
-        bsz = 256
-        stride = 16
-        sparsity = 0.05
+    # for _ in range(1):
+    #     bsz = 256
+    #     stride = 16
+    #     sparsity = 0.05
 
-        full_kv_len = np.random.randint(1000, 8192, size=bsz)
-        p_q_lens = []
-        p_kv_lens = []
-        d_q_lens = []
-        d_kv_lens = []
-        for i in range(bsz):
-            if i % stride == 0:
-                kv_len = full_kv_len[i]
-                qo_len = stride + 1
-                p_q_lens.append(qo_len)
-                p_kv_lens.append(kv_len)
-            else:
-                kv_len = int(full_kv_len[i] * sparsity)
-                qo_len = 1
-                d_q_lens.append(qo_len)
-                d_kv_lens.append(kv_len)
+    #     full_kv_len = np.random.randint(1000, 8192, size=bsz)
+    #     p_q_lens = []
+    #     p_kv_lens = []
+    #     d_q_lens = []
+    #     d_kv_lens = []
+    #     for i in range(bsz):
+    #         if i % stride == 0:
+    #             kv_len = full_kv_len[i]
+    #             qo_len = stride + 1
+    #             p_q_lens.append(qo_len)
+    #             p_kv_lens.append(kv_len)
+    #         else:
+    #             kv_len = int(full_kv_len[i] * sparsity)
+    #             qo_len = 1
+    #             d_q_lens.append(qo_len)
+    #             d_kv_lens.append(kv_len)
 
-        p_q_configs.append(p_q_lens)
-        p_kv_configs.append(p_kv_lens)
-        d_q_len_configs.append(d_q_lens)
-        d_kv_len_configs.append(d_kv_lens)
+    #     p_q_configs.append(p_q_lens)
+    #     p_kv_configs.append(p_kv_lens)
+    #     d_q_len_configs.append(d_q_lens)
+    #     d_kv_len_configs.append(d_kv_lens)
 
-    for _ in range(1):
-        bsz = 128
-        stride = 16
-        sparsity = 0.05
+    # for _ in range(1):
+    #     bsz = 128
+    #     stride = 16
+    #     sparsity = 0.05
 
-        full_kv_len = np.random.randint(2000, 16000, size=bsz)
-        p_q_lens = []
-        p_kv_lens = []
-        d_q_lens = []
-        d_kv_lens = []
+    #     full_kv_len = np.random.randint(2000, 16000, size=bsz)
+    #     p_q_lens = []
+    #     p_kv_lens = []
+    #     d_q_lens = []
+    #     d_kv_lens = []
 
-        for i in range(bsz):
-            if i % stride == 0:
-                kv_len = full_kv_len[i]
-                qo_len = stride + 1
-                p_q_lens.append(qo_len)
-                p_kv_lens.append(kv_len)
-            else:
-                kv_len = int(full_kv_len[i] * sparsity)
-                qo_len = 1
-                d_q_lens.append(qo_len)
-                d_kv_lens.append(kv_len)
+    #     for i in range(bsz):
+    #         if i % stride == 0:
+    #             kv_len = full_kv_len[i]
+    #             qo_len = stride + 1
+    #             p_q_lens.append(qo_len)
+    #             p_kv_lens.append(kv_len)
+    #         else:
+    #             kv_len = int(full_kv_len[i] * sparsity)
+    #             qo_len = 1
+    #             d_q_lens.append(qo_len)
+    #             d_kv_lens.append(kv_len)
 
-        p_q_configs.append(p_q_lens)
-        p_kv_configs.append(p_kv_lens)
-        d_q_len_configs.append(d_q_lens)
-        d_kv_len_configs.append(d_kv_lens)
+    #     p_q_configs.append(p_q_lens)
+    #     p_kv_configs.append(p_kv_lens)
+    #     d_q_len_configs.append(d_q_lens)
+    #     d_kv_len_configs.append(d_kv_lens)
 
     page_block_size = 1
     num_kv_heads = 4
