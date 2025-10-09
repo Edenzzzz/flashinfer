@@ -72,6 +72,25 @@ def run_bench(
     measurements = bench_gpu_time(lambda: wrapper_old.run(q, kv_data))
     ms_old = np.median(measurements)
 
+    wrapper_persistent = flashinfer.BatchAttention(kv_layout=kv_layout)
+    wrapper_persistent.plan(
+        q_indptr.to(device),
+        kv_indptr.to(device),
+        torch.arange(num_blocks).int().to(device),
+        seq_lens.to(device),
+        num_qo_heads,
+        num_kv_heads,
+        head_dim,
+        head_dim,
+        page_block_size,
+        causal=causal,
+        q_data_type=torch.bfloat16,
+        kv_data_type=torch.bfloat16,
+    )
+    o_persistent, _ = wrapper_persistent.run(q, kv_data)
+    measurements_persistent = bench_gpu_time(lambda: wrapper_persistent.run(q, kv_data))
+    ms_persistent = np.median(measurements_persistent)
+
     if len(p_kv_lens) == 1:
         q_d = q[: d_q_indptr[-1]]
         kv_d = kv_data[: d_kv_indptr[-1]].unbind(1)
@@ -124,6 +143,7 @@ def run_bench(
         )
         ms_pod = np.median(measurements)
     print(f"Elapsed time (Batched Prefill): {ms_old:.2f} ms")
+    print(f"Elapsed time (Persistent BatchAttention): {ms_persistent:.2f} ms")
     if len(p_kv_lens) == 1:
         print(f"Elapsed time (POD Attention): {ms_pod:.2f} ms")
     total_bytes = (
@@ -132,8 +152,12 @@ def run_bench(
     print(f"Loading memory size (MB): {total_bytes / (1024**2):.2f} MB")
 
     bandwidth_old_gb_s = total_bytes / (ms_old * 1e-3) / (1024**3)
+    bandwidth_persistent_gb_s = total_bytes / (ms_persistent * 1e-3) / (1024**3)
 
     print(f"Memory bandwidth (Batched Prefill): {bandwidth_old_gb_s:.2f} GB/s")
+    print(
+        f"Memory bandwidth (Persistent BatchAttention): {bandwidth_persistent_gb_s:.2f} GB/s"
+    )
     if len(p_kv_lens) == 1:
         bandwidth_pod_gb_s = total_bytes / (ms_pod * 1e-3) / (1024**3)
         print(f"Memory bandwidth (POD Attention): {bandwidth_pod_gb_s:.2f} GB/s")
