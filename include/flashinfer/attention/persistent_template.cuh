@@ -61,10 +61,10 @@ __global__ __launch_bounds__(
                                              typename BlockPersistentRunner1::Params params_1,
                                              const __grid_constant__
                                              typename BlockPersistentRunner2::Params params_2,
-                                             int* cta_counter = nullptr) {
+                                             int* cta_counter, bool flipped_schedule = false) {
   extern __shared__ uint8_t smem[];
   int sm_id, cta_count = 0;
-  if (cta_counter != nullptr) {
+  if (flipped_schedule) {
     if (threadIdx.x == 0) {
       asm volatile("mov.u32 %0, %smid;" : "=r"(sm_id));
       cta_count = atomicAdd(cta_counter + sm_id, 1);

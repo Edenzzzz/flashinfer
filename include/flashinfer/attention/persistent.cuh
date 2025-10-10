@@ -642,17 +642,16 @@ cudaError_t BatchPagedAttentionPersistent(const Params params_1, const Params pa
   int num_sm = 0;
   int num_ctas_per_sm = 0;
   static int* cta_counter = nullptr;
-  if (flipped_schedule) {
+  if (flipped_schedule && cta_counter == nullptr) {
     FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&num_sm, cudaDevAttrMultiProcessorCount, 0));
     FLASHINFER_CUDA_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&num_ctas_per_sm, kernel,
                                                                        NUM_THREADS, smem_size));
     FLASHINFER_CUDA_CALL(
         cudaMallocAsync(&cta_counter, sizeof(int) * num_sm * num_ctas_per_sm, stream));
-    FLASHINFER_CUDA_CALL(
-        cudaMemsetAsync(cta_counter, 0, sizeof(int) * num_sm * num_ctas_per_sm, stream));
   }
 
-  void* args[] = {(void*)&params_1, (void*)&params_2, (void*)&cta_counter};
+  void* args[] = {(void*)&params_1, (void*)&params_2, (void*)&cta_counter,
+                  (void*)&flipped_schedule};
 
   FLASHINFER_CUDA_CALL(
       cudaLaunchCooperativeKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
