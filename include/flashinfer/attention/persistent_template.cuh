@@ -53,6 +53,60 @@ struct max_threads<Runner1, Runner2, RestRunners...> {
                                       : max_threads<Runner2, RestRunners...>::value;
 };
 
+// Execution order dispatcher using template specialization
+template <int ExecutionOrder>
+struct ExecutionOrderDispatcher {
+  template <class BlockPersistentRunner1, class BlockPersistentRunner2>
+  static __device__ void run(
+      const typename BlockPersistentRunner1::Params& params_1,
+      const typename BlockPersistentRunner2::Params& params_2,
+      typename BlockPersistentRunner1::KTraits::SharedStorage& smem_storage_1,
+      typename BlockPersistentRunner2::KTraits::SharedStorage& smem_storage_2) {
+    if constexpr (ExecutionOrder == 0) {
+      // Normal order: Runner1 -> Runner2
+      BlockPersistentRunner1::Run(params_1, &smem_storage_1);
+      BlockPersistentRunner2::Run(params_2, &smem_storage_2);
+    } else {
+      // Flipped order: Runner2 -> Runner1
+      BlockPersistentRunner2::Run(params_2, &smem_storage_2);
+      BlockPersistentRunner1::Run(params_1, &smem_storage_1);
+    }
+  }
+
+  template <class BlockPersistentRunner1, class BlockPersistentRunner2>
+  static __device__ void run(
+      const typename BlockPersistentRunner1::Params& params_1,
+      const typename BlockPersistentRunner2::Params& params_2,
+      typename BlockPersistentRunner1::KTraits::SharedStorage& smem_storage_1,
+      typename BlockPersistentRunner2::KTraits::SharedStorage& smem_storage_2,
+      ProfilerClosure& profiler_closure) {
+    if constexpr (ExecutionOrder == 0) {
+      // Normal order: Runner1 -> Runner2
+      BlockPersistentRunner1::Run(params_1, &smem_storage_1, profiler_closure);
+      BlockPersistentRunner2::Run(params_2, &smem_storage_2, profiler_closure);
+    } else {
+      // Flipped order: Runner2 -> Runner1
+      BlockPersistentRunner2::Run(params_2, &smem_storage_2, profiler_closure);
+      BlockPersistentRunner1::Run(params_1, &smem_storage_1, profiler_closure);
+    }
+  }
+};
+
+// Dispatch macro to make runtime variable appear as compile-time constant
+#define DISPATCH_EXEC_ORDER(execution_order, Runner1, Runner2, ...)               \
+  [&]() -> bool {                                                                 \
+    switch (execution_order) {                                                    \
+      case 0:                                                                     \
+        ExecutionOrderDispatcher<0>::template run<Runner1, Runner2>(__VA_ARGS__); \
+        return true;                                                              \
+      case 1:                                                                     \
+        ExecutionOrderDispatcher<1>::template run<Runner1, Runner2>(__VA_ARGS__); \
+        return true;                                                              \
+      default:                                                                    \
+        return false;                                                             \
+    }                                                                             \
+  }()
+
 // Two runners version
 template <class BlockPersistentRunner1, class BlockPersistentRunner2, class BlockReductionRunner>
 __global__ __launch_bounds__(
@@ -74,9 +128,9 @@ __global__ __launch_bounds__(
     cta_count = ((int*)smem)[0];
   }
 
-#ifdef FLASHINFER_ENABLE_PROFILER
   ProfilerClosure
       profiler_closure;  // no volatile as this is scope.CTA, and only threadIdx == 0 is modifying
+#ifdef FLASHINFER_ENABLE_PROFILER
   PROFILER_INIT(params_1, smem, profiler_closure, 0, 1, (threadIdx.x == 0));
 #endif
 
@@ -86,28 +140,23 @@ __global__ __launch_bounds__(
       reinterpret_cast<typename BlockPersistentRunner2::KTraits::SharedStorage&>(smem);
   auto grid = cg::this_grid();
 
+  // Dispatch execution order using template specialization
+  int execution_order = cta_count % 2;
+  DISPATCH_EXEC_ORDER(execution_order, BlockPersistentRunner1, BlockPersistentRunner2, params_1,
+                      params_2, smem_storage_1, smem_storage_2
+#ifdef FLASHINFER_ENABLE_PROFILER
+                      ,
+                      profiler_closure
+#endif
+  );
+
 #ifndef FLASHINFER_ENABLE_PROFILER
-  if (cta_count % 2 == 0) {
-    BlockPersistentRunner1::Run(params_1, &smem_storage_1);  // tile size 128
-    BlockPersistentRunner2::Run(params_2, &smem_storage_2);  // tile size 16
-  } else {
-    BlockPersistentRunner2::Run(params_2, &smem_storage_2);
-    BlockPersistentRunner1::Run(params_1, &smem_storage_1);
-  }
   grid.sync();
   BlockReductionRunner::Run(params_1.partial_o, params_1.final_o, params_1.partial_lse,
                             params_1.final_lse, *(params_1.num_packed_qo_len),
                             params_1.gqa_group_size, params_1.num_kv_heads, params_1.merge_indptr,
                             params_1.merge_o_indices, smem);
 #else
-  if (cta_count % 2 == 0) {
-    BlockPersistentRunner1::Run(params_1, &smem_storage_1, profiler_closure);
-    BlockPersistentRunner2::Run(params_2, &smem_storage_2, profiler_closure);
-  } else {
-    BlockPersistentRunner2::Run(params_2, &smem_storage_2, profiler_closure);
-    BlockPersistentRunner1::Run(params_1, &smem_storage_1, profiler_closure);
-  }
-
   grid.sync();
   BlockReductionRunner::Run(params_1.partial_o, params_1.final_o, params_1.partial_lse,
                             params_1.final_lse, *(params_1.num_packed_qo_len),
