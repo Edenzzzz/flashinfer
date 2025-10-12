@@ -137,7 +137,6 @@ def run_bench(
     )
 
     # Separate prefill and decode wrappers
-
     q_lens_d = torch.tensor(decode_qo_lens, dtype=torch.int32, device=device)
     q_indptr_d = torch.cat(
         [torch.tensor([0], device=device), torch.cumsum(q_lens_d, 0)], dim=0
@@ -177,32 +176,33 @@ def run_bench(
             lambda: wrapper_decode.run(q_d, kv_data_d), repeat_iters=repeats
         )
         ms_decode = (
-            np.mean(measurements_decode) + (end_time_d - start_time_d) / NUM_LAYERS
+            np.mean(measurements_decode)
+            + (end_time_d - start_time_d) * 1000 / NUM_LAYERS
         )
     else:
         ms_decode = 0
 
-    if len(prefill_qo_lens) > 0:
-        wrapper_prefill = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-            torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=device),
-            kv_layout="NHD",
-            backend="fa2",
-        )
-        q_lens_p = torch.tensor(prefill_qo_lens, dtype=torch.int32, device=device)
-        q_indptr_p = torch.cat(
-            [torch.tensor([0], device=device), torch.cumsum(q_lens_p, 0)], dim=0
-        ).int()
-        seq_lens_p = torch.tensor(prefill_kv_lens, dtype=torch.int32, device=device)
-        seq_lens_blocks_p = torch.ceil(seq_lens_p / page_block_size).int()
-        kv_indptr_p = torch.cat(
-            [torch.tensor([0], device=device), torch.cumsum(seq_lens_blocks_p, 0)],
-            dim=0,
-        ).int()
-        num_blocks_p = kv_indptr_p[-1].item()
-        q_p = q[q_indptr_d[-1].item() :]
-        kv_data_p = kv_data[num_blocks_d:]
-        last_page_len_p = (seq_lens_p - 1) % page_block_size + 1
+    wrapper_prefill = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+        torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=device),
+        kv_layout="NHD",
+        backend="fa2",
+    )
+    q_lens_p = torch.tensor(prefill_qo_lens, dtype=torch.int32, device=device)
+    q_indptr_p = torch.cat(
+        [torch.tensor([0], device=device), torch.cumsum(q_lens_p, 0)], dim=0
+    ).int()
+    seq_lens_p = torch.tensor(prefill_kv_lens, dtype=torch.int32, device=device)
+    seq_lens_blocks_p = torch.ceil(seq_lens_p / page_block_size).int()
+    kv_indptr_p = torch.cat(
+        [torch.tensor([0], device=device), torch.cumsum(seq_lens_blocks_p, 0)],
+        dim=0,
+    ).int()
+    num_blocks_p = kv_indptr_p[-1].item()
+    q_p = q[q_indptr_d[-1].item() :]
+    kv_data_p = kv_data[num_blocks_d:]
+    last_page_len_p = (seq_lens_p - 1) % page_block_size + 1
 
+    if len(prefill_qo_lens) > 0:
         start_time_p = time.perf_counter()
         wrapper_prefill.plan(
             q_indptr_p.to(device),
@@ -222,12 +222,36 @@ def run_bench(
             lambda: wrapper_prefill.run(q_p, kv_data_p), repeat_iters=repeats
         )
         ms_prefill = (
-            np.mean(measurements_prefill) + (end_time_p - start_time_p) / NUM_LAYERS
+            np.mean(measurements_prefill)
+            + (end_time_p - start_time_p) * 1000 / NUM_LAYERS
         )
     else:
         ms_prefill = 0
 
     ms_separate = ms_prefill + ms_decode
+
+    # Somehow the first wrapper suffers significant latency...
+    # have to use the new wrapper here
+    start_time = time.perf_counter()
+    wrapper_prefill.plan(
+        q_indptr.to(device),
+        kv_indptr.to(device),
+        torch.arange(num_blocks, dtype=torch.int32, device=device),
+        last_page_len,
+        num_qo_heads,
+        num_kv_heads,
+        head_dim,
+        page_block_size,
+        causal=causal,
+        q_data_type=torch.bfloat16,
+        kv_data_type=torch.bfloat16,
+    )
+    end_time = time.perf_counter()
+    measurements_old = bench_gpu_time(
+        lambda: wrapper_prefill.run(q, kv_data), repeat_iters=repeats
+    )
+    ms_old = np.mean(measurements_old) + (end_time - start_time) * 1000 / NUM_LAYERS
+    print(f"ms_old: {ms_old}, ms_prefill: {ms_prefill}")
 
     total_bytes = (
         q.numel() * q.element_size() + kv_data.numel() * kv_data.element_size()
@@ -274,11 +298,11 @@ def synthesize_seq_len_configs(
 def main(args: argparse.Namespace) -> None:
     np.random.seed(42)
     torch.random.manual_seed(42)
-    decode_len = 2048
+    decode_len = 16384
     prefill_len = 8192
     prefill_chunk_size = 8192
     num_prefill_reqs = 1
-    num_decode_reqs = 128
+    num_decode_reqs = 0  # 128
 
     decode_lens, prefill_lens = synthesize_seq_len_configs(
         decode_len, prefill_len, prefill_chunk_size, num_prefill_reqs, num_decode_reqs
