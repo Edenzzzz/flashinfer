@@ -274,7 +274,7 @@ def synthesize_seq_len_configs(
 def main(args: argparse.Namespace) -> None:
     np.random.seed(42)
     torch.random.manual_seed(42)
-    decode_len = 16384
+    decode_len = 2048
     prefill_len = 8192
     prefill_chunk_size = 8192
     num_prefill_reqs = 1
