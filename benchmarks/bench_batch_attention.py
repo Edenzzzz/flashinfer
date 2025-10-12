@@ -10,7 +10,6 @@ import torch
 import time
 import flashinfer
 from flashinfer.testing.utils import bench_gpu_time
-from torch.testing import assert_close
 
 NUM_LAYERS = 36  # QWen3 8b
 
@@ -27,9 +26,8 @@ def run_bench(
     head_dim: int,
     device: int = 0,
     causal: bool = True,
-    flipped_schedule: bool = False,
     repeats: int = 50,
-) -> Tuple[float, float, float, float, float, float, float]:
+) -> Tuple[float, float, float, float, float, float, float, float, float]:
     kv_lens = list(decode_kv_lens) + list(prefill_kv_lens)
     seq_lens = torch.tensor(kv_lens, dtype=torch.int32)
     q_lens = torch.tensor(
@@ -57,37 +55,35 @@ def run_bench(
     )
 
     # old
-    if flipped_schedule:
-        wrapper_old = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-            torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=device),
-            kv_layout="NHD",
-            backend="fa2",
-        )
-        last_page_len = (seq_lens - 1) % page_block_size + 1
-        start_time = time.perf_counter()
-        wrapper_old.plan(
-            q_indptr.to(device),
-            kv_indptr.to(device),
-            torch.arange(num_blocks, dtype=torch.int32, device=device),
-            last_page_len,
-            num_qo_heads,
-            num_kv_heads,
-            head_dim,
-            page_block_size,
-            causal=causal,
-            q_data_type=torch.bfloat16,
-            kv_data_type=torch.bfloat16,
-        )
-        end_time = time.perf_counter()
-        measurements_old = bench_gpu_time(
-            lambda: wrapper_old.run(q, kv_data), repeat_iters=repeats
-        )
-        ms_old = np.mean(measurements_old) + (end_time - start_time) * 1000 / NUM_LAYERS
-    else:
-        ms_old = 1
+    wrapper_old = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+        torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=device),
+        kv_layout="NHD",
+        backend="fa2",
+    )
+    last_page_len = (seq_lens - 1) % page_block_size + 1
+    start_time = time.perf_counter()
+    wrapper_old.plan(
+        q_indptr.to(device),
+        kv_indptr.to(device),
+        torch.arange(num_blocks, dtype=torch.int32, device=device),
+        last_page_len,
+        num_qo_heads,
+        num_kv_heads,
+        head_dim,
+        page_block_size,
+        causal=causal,
+        q_data_type=torch.bfloat16,
+        kv_data_type=torch.bfloat16,
+    )
+    end_time = time.perf_counter()
+    measurements_old = bench_gpu_time(
+        lambda: wrapper_old.run(q, kv_data), repeat_iters=repeats
+    )
+    ms_old = np.mean(measurements_old) + (end_time - start_time) * 1000 / NUM_LAYERS
 
-    # new
+    # Fused kernel
     wrapper = flashinfer.BatchAttention(kv_layout="NHD")
+    # Normal schedule
     start_time = time.perf_counter()
     wrapper.plan(
         q_indptr.to(device),
@@ -102,37 +98,64 @@ def run_bench(
         causal=causal,
         q_data_type=torch.bfloat16,
         kv_data_type=torch.bfloat16,
+        flipped_schedule=False,
     )
     end_time = time.perf_counter()
-    measurements_new = bench_gpu_time(
-        lambda: wrapper.run(q, kv_data, flipped_schedule=flipped_schedule),
+    measurements_new_normal = bench_gpu_time(
+        lambda: wrapper.run(q, kv_data),
         repeat_iters=repeats,
     )
-    ms_new = np.mean(measurements_new) + (end_time - start_time) * 1000 / NUM_LAYERS
-    o, _ = wrapper.run(q, kv_data, flipped_schedule=flipped_schedule)
-    if flipped_schedule:
-        # Separate prefill and decode wrappers
-        wrapper_prefill = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-            torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=device),
-            kv_layout="NHD",
-            backend="fa2",
-        )
+    ms_new_normal = (
+        np.mean(measurements_new_normal) + (end_time - start_time) * 1000 / NUM_LAYERS
+    )
+    o, _ = wrapper.run(q, kv_data)
+
+    # Overlap schedule
+    start_time = time.perf_counter()
+    wrapper.plan(
+        q_indptr.to(device),
+        kv_indptr.to(device),
+        torch.arange(num_blocks, dtype=torch.int32, device=device),
+        seq_lens.to(device),
+        num_qo_heads,
+        num_kv_heads,
+        head_dim,
+        head_dim,
+        page_block_size,
+        causal=causal,
+        q_data_type=torch.bfloat16,
+        kv_data_type=torch.bfloat16,
+        flipped_schedule=True,
+    )
+    end_time = time.perf_counter()
+    measurements_new_flipped = bench_gpu_time(
+        lambda: wrapper.run(q, kv_data),
+        repeat_iters=repeats,
+    )
+    ms_new_flipped = (
+        np.mean(measurements_new_flipped) + (end_time - start_time) * 1000 / NUM_LAYERS
+    )
+
+    # Separate prefill and decode wrappers
+
+    q_lens_d = torch.tensor(decode_qo_lens, dtype=torch.int32, device=device)
+    q_indptr_d = torch.cat(
+        [torch.tensor([0], device=device), torch.cumsum(q_lens_d, 0)], dim=0
+    ).int()
+    seq_lens_d = torch.tensor(decode_kv_lens, dtype=torch.int32)
+    seq_lens_blocks_d = torch.ceil(seq_lens_d / page_block_size).int()
+    kv_indptr_d = torch.cat(
+        [torch.tensor([0]), torch.cumsum(seq_lens_blocks_d, 0)], dim=0
+    ).int()
+    num_blocks_d = kv_indptr_d[-1].item()
+    if len(decode_qo_lens) > 0:
         wrapper_decode = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
             torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=device),
             kv_layout="NHD",
             backend="fa2",
             use_tensor_cores=True,
         )
-        q_lens_d = torch.tensor(decode_qo_lens, dtype=torch.int32, device=device)
-        q_indptr_d = torch.cat(
-            [torch.tensor([0], device=device), torch.cumsum(q_lens_d, 0)], dim=0
-        ).int()
-        seq_lens_d = torch.tensor(decode_kv_lens, dtype=torch.int32)
-        seq_lens_blocks_d = torch.ceil(seq_lens_d / page_block_size).int()
-        kv_indptr_d = torch.cat(
-            [torch.tensor([0]), torch.cumsum(seq_lens_blocks_d, 0)], dim=0
-        ).int()
-        num_blocks_d = kv_indptr_d[-1].item()
+
         last_page_len_d = (seq_lens_d - 1) % page_block_size + 1
 
         q_d = q[: q_indptr_d[-1].item()]
@@ -150,7 +173,21 @@ def run_bench(
             kv_data_type=torch.bfloat16,
         )
         end_time_d = time.perf_counter()
+        measurements_decode = bench_gpu_time(
+            lambda: wrapper_decode.run(q_d, kv_data_d), repeat_iters=repeats
+        )
+        ms_decode = (
+            np.mean(measurements_decode) + (end_time_d - start_time_d) / NUM_LAYERS
+        )
+    else:
+        ms_decode = 0
 
+    if len(prefill_qo_lens) > 0:
+        wrapper_prefill = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+            torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=device),
+            kv_layout="NHD",
+            backend="fa2",
+        )
         q_lens_p = torch.tensor(prefill_qo_lens, dtype=torch.int32, device=device)
         q_indptr_p = torch.cat(
             [torch.tensor([0], device=device), torch.cumsum(q_lens_p, 0)], dim=0
@@ -187,34 +224,36 @@ def run_bench(
         ms_prefill = (
             np.mean(measurements_prefill) + (end_time_p - start_time_p) / NUM_LAYERS
         )
-        measurements_decode = bench_gpu_time(
-            lambda: wrapper_decode.run(q_d, kv_data_d), repeat_iters=repeats
-        )
-        ms_decode = (
-            np.mean(measurements_decode) + (end_time_d - start_time_d) / NUM_LAYERS
-        )
-        ms_separate = ms_prefill + ms_decode
-        o_d = wrapper_decode.run(q_d, kv_data_d)
-        o_p = wrapper_prefill.run(q_p, kv_data_p)
-        o_separate = torch.cat([o_d, o_p], dim=0)
-        # assert_close(o, o_separate, rtol=1e-3, atol=1e-3)
     else:
-        ms_separate = 1
+        ms_prefill = 0
+
+    ms_separate = ms_prefill + ms_decode
 
     total_bytes = (
         q.numel() * q.element_size() + kv_data.numel() * kv_data.element_size()
     )
     mem_MB = total_bytes / 1024**2
     bw_old = total_bytes / (ms_old * 1e-3) / 1024**3
-    bw_new = total_bytes / (ms_new * 1e-3) / 1024**3
+    bw_new_normal = total_bytes / (ms_new_normal * 1e-3) / 1024**3
+    bw_new_flipped = total_bytes / (ms_new_flipped * 1e-3) / 1024**3
     bw_separate = total_bytes / (ms_separate * 1e-3) / 1024**3
 
-    return ms_old, ms_new, ms_separate, mem_MB, bw_old, bw_new, bw_separate  # type: ignore
+    return (
+        ms_old,
+        ms_new_normal,
+        ms_new_flipped,
+        ms_separate,
+        mem_MB,
+        bw_old,
+        bw_new_normal,
+        bw_new_flipped,
+        bw_separate,
+    )  # type: ignore
 
 
-def synthesize_seq_len_configs(decode_len, prefill_len, prefill_chunk_size) -> Tuple[
-    List[List[Tuple[int, int]]], List[List[Tuple[int, int]]]
-]:
+def synthesize_seq_len_configs(
+    decode_len, prefill_len, prefill_chunk_size, num_prefill_reqs, num_decode_reqs
+) -> Tuple[List[List[Tuple[int, int]]], List[List[Tuple[int, int]]]]:
     # cfgs: List[List[Tuple[int, int]]] = [
     #     # [(8192, 1)] * 128,  # decode-only
     #     # [(4096, 128)] * 4,  # prefill-only
@@ -223,36 +262,32 @@ def synthesize_seq_len_configs(decode_len, prefill_len, prefill_chunk_size) -> T
     #     [(8192, 1)] * 127 * 2 + [(8192, 4096)] * 1,  # hybrid (chunked-prefill)
     # ]
     decode_lens: List[List[Tuple[int, int]]] = [
-        [(decode_len, 1)] * 128,
+        [(decode_len, 1)] * num_decode_reqs,
     ]
     prefill_lens: List[List[Tuple[int, int]]] = [
-        [(prefill_len, prefill_chunk_size)] * 1,
+        [(prefill_len, prefill_chunk_size)] * num_prefill_reqs,
     ]
 
-    # def _rand_case(bsz: int, lo: int, hi: int) -> List[Tuple[int, int]]:
-    #     stride, sparsity = 16, 0.05
-    #     full = np.random.randint(lo, hi, size=bsz)
-    #     out = []
-    #     for i, kv_len in enumerate(full):
-    #         if i % stride == 0:
-    #             out.append((kv_len, stride + 1))
-    #         else:
-    #             out.append((int(kv_len * sparsity), 1))
-    #     return out
-
-    # cfgs.append(_rand_case(256, 1000, 8192))
-    # cfgs.append(_rand_case(128, 2000, 16_000))
     return decode_lens, prefill_lens
 
 
 def main(args: argparse.Namespace) -> None:
     np.random.seed(42)
     torch.random.manual_seed(42)
-    decode_len = 8192
+    decode_len = 16384
     prefill_len = 8192
     prefill_chunk_size = 8192
-    decode_lens, prefill_lens = synthesize_seq_len_configs(decode_len, prefill_len, prefill_chunk_size)
+    num_prefill_reqs = 1
+    num_decode_reqs = 128
 
+    decode_lens, prefill_lens = synthesize_seq_len_configs(
+        decode_len, prefill_len, prefill_chunk_size, num_prefill_reqs, num_decode_reqs
+    )
+    if num_prefill_reqs == 0:
+        prefill_chunk_size = 0
+        prefill_len = 0
+    if num_decode_reqs == 0:
+        decode_len = 0
     # sweep = {
     #     "page_block_size": (1,),  # (1, 8, 16),
     #     "head_dim": (
@@ -284,6 +319,7 @@ def main(args: argparse.Namespace) -> None:
     ]
     records_old = []
     records_new = []
+    records_new_flipped = []
     records_separate = []
     for cfg_id, (decode_case, prefill_case) in enumerate(
         zip(decode_lens, prefill_lens), start=1
@@ -299,21 +335,28 @@ def main(args: argparse.Namespace) -> None:
                 param["num_kv_heads"],
                 param["num_qo_heads"],
             )
-            ms_old, ms_new, ms_separate, mem_MB, bw_old, bw_new, bw_separate = (
-                run_bench(
-                    decode_kv_lens,
-                    decode_qo_lens,
-                    prefill_kv_lens,
-                    prefill_qo_lens,
-                    page_block_size=pbs,
-                    num_kv_heads=n_kv,
-                    num_qo_heads=n_qo,
-                    head_dim=hd,
-                    device=0,
-                    causal=True,
-                    flipped_schedule=args.flipped,
-                    repeats=args.repeats,
-                )
+            (
+                ms_old,
+                ms_new_normal,
+                ms_new_flipped,
+                ms_separate,
+                mem_MB,
+                bw_old,
+                bw_new_normal,
+                bw_new_flipped,
+                bw_separate,
+            ) = run_bench(
+                decode_kv_lens,
+                decode_qo_lens,
+                prefill_kv_lens,
+                prefill_qo_lens,
+                page_block_size=pbs,
+                num_kv_heads=n_kv,
+                num_qo_heads=n_qo,
+                head_dim=hd,
+                device=0,
+                causal=True,
+                repeats=args.repeats,
             )
             records_old.extend(
                 [
@@ -337,16 +380,34 @@ def main(args: argparse.Namespace) -> None:
             records_new.extend(
                 [
                     {
-                        "scheduler": "BatchAttentionWrapper"
-                        + (" (flipped)" if args.flipped else ""),
+                        "scheduler": "BatchAttentionWrapper",
                         "seq_cfg_id": cfg_id,
                         "page_size": pbs,
                         "head_dim": hd,
                         "num_kv_heads": n_kv,
                         "num_qo_heads": n_qo,
-                        "time_ms": ms_new,
+                        "time_ms": ms_new_normal,
                         "memory_MB": mem_MB,
-                        "bandwidth_GB_s": bw_new,
+                        "bandwidth_GB_s": bw_new_normal,
+                        "num_repeats": args.repeats,
+                        "decode_len": decode_len,
+                        "prefill_len": prefill_len,
+                        "prefill_chunk_size": prefill_chunk_size,
+                    },
+                ]
+            )
+            records_new_flipped.extend(
+                [
+                    {
+                        "scheduler": "BatchAttentionWrapper (flipped)",
+                        "seq_cfg_id": cfg_id,
+                        "page_size": pbs,
+                        "head_dim": hd,
+                        "num_kv_heads": n_kv,
+                        "num_qo_heads": n_qo,
+                        "time_ms": ms_new_flipped,
+                        "memory_MB": mem_MB,
+                        "bandwidth_GB_s": bw_new_flipped,
                         "num_repeats": args.repeats,
                         "decode_len": decode_len,
                         "prefill_len": prefill_len,
@@ -374,7 +435,7 @@ def main(args: argparse.Namespace) -> None:
                 ]
             )
     df = pd.DataFrame(
-        records_old + records_new + records_separate if args.flipped else records_new,
+        records_old + records_new + records_new_flipped + records_separate,
         columns=[
             "scheduler",
             "seq_cfg_id",
@@ -391,24 +452,21 @@ def main(args: argparse.Namespace) -> None:
             "prefill_chunk_size",
         ],
     )
-    file_name = "bench_batch_attention_flipped.csv"
+    file_name = "bench_batch_attention.csv"
     if os.path.exists(file_name):
-        # append to the existing csv without writing headers again
-        df.to_csv(file_name, mode="a", index=False, header=False)
-    else:
-        df.to_csv(file_name, index=False)
+        os.remove(file_name)
+
+    df.to_csv(file_name, index=False)
     # remove last 4 columns
     df = df.iloc[:, :-4]
     print(df.to_markdown(index=False, floatfmt=".2f"))
 
 
 if __name__ == "__main__":
-    # (NOTE)Somehow running the flipped schedule together with the normal schedule in one run causes incorrect performance for both
-    # (slightly decrease for flipped, slightly increase for normal)
-    # Flushing the l2 cache doesn't help. So we split the runs for now
+    # Now running both normal and flipped schedules in a single run
+    # Each configuration will be benchmarked with both scheduling strategies
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--flipped", action="store_true")
     parser.add_argument("--repeats", type=int, default=100)
     args = parser.parse_args()
     main(args)

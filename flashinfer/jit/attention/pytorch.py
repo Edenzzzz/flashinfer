@@ -427,6 +427,7 @@ def get_batch_attention_uri(
     pos_encoding_mode: int,
     use_logits_soft_cap: bool,
     use_profiler: bool,
+    flipped_schedule: bool = False,
 ) -> str:
     return (
         f"batch_attention_with_kv_cache_dtype_q_{filename_safe_dtype_map[dtype_q]}_"
@@ -437,7 +438,8 @@ def get_batch_attention_uri(
         f"head_dim_vo_{head_dim_vo}_"
         f"posenc_{pos_encoding_mode}_"
         f"use_logits_soft_cap_{str(use_logits_soft_cap).lower()}_"
-        f"use_profiler_{str(use_profiler).lower()}"
+        f"use_profiler_{str(use_profiler).lower()}_"
+        f"flipped_schedule_{str(flipped_schedule).lower()}"
     )
 
 
@@ -943,6 +945,7 @@ def gen_batch_attention_module(
     pos_encoding_mode: int,
     use_logits_soft_cap: bool,
     use_profiler: bool,
+    flipped_schedule: bool = False,
 ):
     uri = get_batch_attention_uri(
         dtype_q,
@@ -954,6 +957,7 @@ def gen_batch_attention_module(
         pos_encoding_mode,
         use_logits_soft_cap,
         use_profiler,
+        flipped_schedule,
     )
 
     additional_tensor_names: List[str] = []
@@ -980,6 +984,7 @@ def gen_batch_attention_module(
         pos_encoding_mode=pos_encoding_mode,
         use_logits_soft_cap=use_logits_soft_cap,
         use_profiler=use_profiler,
+        flipped_schedule=flipped_schedule,
     )
 
 
@@ -1612,6 +1617,7 @@ def gen_customize_batch_attention_module(
     pos_encoding_mode: int = 0,
     use_logits_soft_cap: bool = False,
     use_profiler: bool = False,
+    flipped_schedule: bool = False,
 ):
     kwargs = {
         "variant_decl": variant_decl,
@@ -1624,6 +1630,7 @@ def gen_customize_batch_attention_module(
         "head_dim_vo": head_dim_vo,
         "pos_encoding_mode": pos_encoding_mode_literal[pos_encoding_mode],
         "use_logits_soft_cap": str(use_logits_soft_cap).lower(),
+        "flipped_schedule": str(flipped_schedule).lower(),
     }
     gen_directory = jit_env.FLASHINFER_GEN_SRC_DIR / uri
     (additional_params_decl, additional_func_params, additional_params_setter) = (

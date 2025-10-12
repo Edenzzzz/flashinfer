@@ -47,7 +47,7 @@ struct StandardAttention : AttentionVariantBase {
   })
 };
 
-#define DISPATCH_context(DTypeQ, DTypeKV, DTypeO, IdType, MASK_MODE, HEAD_DIM_QK, HEAD_DIM_VO, POS_ENCODING_MODE, AttentionVariant, Params, ...) \
+#define DISPATCH_context(DTypeQ, DTypeKV, DTypeO, IdType, MASK_MODE, HEAD_DIM_QK, HEAD_DIM_VO, POS_ENCODING_MODE, AttentionVariant, FlippedSchedule, Params, ...) \
   DISPATCH_MASK_MODE(mask_mode, MASK_MODE, { \
     using AttentionVariant = {{ variant_name }}; \
     __VA_ARGS__(); \
@@ -61,6 +61,7 @@ using IdType = {{ idtype }};
 constexpr int HEAD_DIM_QK = {{ head_dim_qk }};
 constexpr int HEAD_DIM_VO = {{ head_dim_vo }};
 constexpr auto POS_ENCODING_MODE = {{ pos_encoding_mode }};
+constexpr auto FlippedSchedule = {{ flipped_schedule }};
 
 struct PersistentParams {
   using DTypeQ = DTypeQ;

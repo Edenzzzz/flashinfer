@@ -4,7 +4,7 @@ import pandas as pd
 
 cases = {"1": "chunked"}
 # Load consolidated CSV (contains flipped, original, prefill, and decode+prefill)
-df_all = pd.read_csv("bench_batch_attention_flipped.csv")
+df_all = pd.read_csv("bench_batch_attention.csv")
 
 # Clean up potential duplicated header rows after appends and ensure numeric types
 if "scheduler" in df_all.columns:
@@ -69,7 +69,7 @@ for repeat in repeats:
     # Center four bars around each category to avoid large empty margins when only one case
     offsets = np.array([-1.5, -0.5, 0.5, 1.5]) * width
 
-    plt.figure(figsize=(12, 6))
+    plt.figure(figsize=(12, 8))  # Increased height for better spacing
     bars1 = plt.bar(
         x + offsets[0],
         persistent_flipped_values,
@@ -101,9 +101,21 @@ for repeat in repeats:
 
     plt.xlabel("Case Type")
     plt.ylabel("Average Bandwidth (GB/s)")
-    plt.title(f"Average Bandwidth ({selected_case_label}, {repeat} repeats, {prefill_chunk_size}k prefill, {decode_len}k decode)")
+    plt.title(
+        f"Average Bandwidth ({selected_case_label}, {repeat} repeats, {prefill_chunk_size}k prefill, {decode_len}k decode)"
+    )
     plt.xticks(x, case_names)
-    plt.legend(fontsize=8, ncol=2)
+
+    # Add more space above the highest bar for legend and value labels
+    max_value = max(
+        max(persistent_flipped_values),
+        max(batch_prefill_values),
+        max(decode_prefill_values),
+        max(persistent_original_values),
+    )
+    plt.ylim(0, max_value * 1.08)  # 8% more space above the highest bar
+
+    plt.legend(fontsize=8, loc="upper right")
 
     # Add value labels on bars
     def add_value_labels(bars):
@@ -111,9 +123,11 @@ for repeat in repeats:
             height = bar.get_height()
             if height == 0:
                 continue
+            # Use proportional offset based on data range
+            offset = max_value * 0.02  # 2% of max value as offset
             plt.text(
                 bar.get_x() + bar.get_width() / 2.0,
-                height + 10,
+                height + offset,
                 f"{height:.1f}",
                 ha="center",
                 va="bottom",
@@ -127,6 +141,8 @@ for repeat in repeats:
 
     plt.tight_layout()
     plt.savefig(
-        f"persistent_comparison_{repeat}_repeats_{prefill_chunk_size}k_prefill_{decode_len}k_decode.png", dpi=300, bbox_inches="tight"
+        f"persistent_comparison_{repeat}_repeats_{prefill_chunk_size}k_prefill_{decode_len}k_decode.png",
+        dpi=300,
+        bbox_inches="tight",
     )
     plt.show()

@@ -82,12 +82,13 @@ class BatchAttention:
         q_data_type: torch.dtype = torch.bfloat16,
         kv_data_type: torch.dtype = torch.bfloat16,
         use_profiler: bool = False,
+        flipped_schedule: bool = False,
     ) -> None:
         if logits_soft_cap is None:
             logits_soft_cap = 0.0
         self._logits_soft_cap = logits_soft_cap
 
-        # get jit module
+        # get jit modules for both flipped and non-flipped schedules
         get_module_args = (
             q_data_type,
             kv_data_type,
@@ -98,6 +99,7 @@ class BatchAttention:
             PosEncodingMode["NONE"].value,
             logits_soft_cap > 0.0,
             use_profiler,  # different compiler path
+            flipped_schedule,
         )
         self.module = get_holistic_attention_module(*get_module_args)
 
@@ -173,7 +175,10 @@ class BatchAttention:
         # profiler_buffer is optional
         profiler_args = (profiler_buffer,) if self._use_profiler else ()
 
-        self.module.run(
+        # Select the appropriate module based on flipped_schedule
+        module = self.module
+
+        module.run(
             self.float_workspace_buffer,
             self.int_workspace_buffer,
             self._plan_info,
@@ -191,7 +196,6 @@ class BatchAttention:
             v_scale,
             sm_scale,
             logits_soft_cap,
-            flipped_schedule,
             # ADDITIONAL_FUNC_PARAMS
             # PROFILER_FUNC_PARAMS
             *profiler_args,

@@ -29,8 +29,7 @@ void BatchPagedAttentionRun(at::Tensor float_workspace_buffer, at::Tensor int_wo
                             std::optional<at::Tensor> maybe_lse, int64_t mask_mode_code,
                             int64_t layout_code, int64_t num_qo_heads, int64_t num_kv_heads,
                             int64_t page_size, double v_scale, double sm_scale,
-                            double logits_soft_cap,
-                            bool flipped_schedule ADDITIONAL_FUNC_PARAMS PROFILER_FUNC_PARAMS);
+                            double logits_soft_cap ADDITIONAL_FUNC_PARAMS PROFILER_FUNC_PARAMS);
 
 TORCH_LIBRARY_FRAGMENT(TORCH_EXTENSION_NAME, m) {
   m.def("plan", &BatchPagedAttentionPlan);

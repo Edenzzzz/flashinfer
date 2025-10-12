@@ -596,10 +596,10 @@ struct BlockBatchReductionPersistent {
 };
 
 template <uint32_t CTA_TILE_Q_1, uint32_t CTA_TILE_Q_2, uint32_t HEAD_DIM_QK, uint32_t HEAD_DIM_VO,
-          MaskMode MASK_MODE, typename AttentionVariant, typename Params>
+          MaskMode MASK_MODE, typename AttentionVariant, bool FlippedSchedule, typename Params>
 cudaError_t BatchPagedAttentionPersistent(const Params params_1, const Params params_2,
                                           const uint32_t num_blks_x, const uint32_t num_blks_y,
-                                          const bool flipped_schedule, const cudaStream_t stream) {
+                                          const cudaStream_t stream) {
   using DTypeQ = typename Params::DTypeQ;
   using DTypeKV = typename Params::DTypeKV;
   using DTypeO = typename Params::DTypeO;
@@ -630,9 +630,10 @@ cudaError_t BatchPagedAttentionPersistent(const Params params_1, const Params pa
       max(sizeof(typename KTraits1::SharedStorage), sizeof(typename KTraits2::SharedStorage));
   smem_size = max(smem_size, ReductionKTraits::SMEM_SIZE);
   // Launch persistent kernel
-  auto kernel = PersistentKernelTemplate<BlockBatchPagedAttentionPersistent<KTraits1, Params>,
-                                         BlockBatchPagedAttentionPersistent<KTraits2, Params>,
-                                         BlockBatchReductionPersistent<ReductionKTraits>>;
+  auto kernel =
+      PersistentKernelTemplate<BlockBatchPagedAttentionPersistent<KTraits1, Params>,
+                               BlockBatchPagedAttentionPersistent<KTraits2, Params>,
+                               BlockBatchReductionPersistent<ReductionKTraits>, FlippedSchedule>;
   FLASHINFER_CUDA_CALL(
       cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
   dim3 nblks(num_blks_x, num_blks_y);
@@ -642,16 +643,17 @@ cudaError_t BatchPagedAttentionPersistent(const Params params_1, const Params pa
   int num_sm = 0;
   int num_ctas_per_sm = 0;
   static int* cta_counter = nullptr;
-  if (flipped_schedule && cta_counter == nullptr) {
-    FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&num_sm, cudaDevAttrMultiProcessorCount, 0));
-    FLASHINFER_CUDA_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&num_ctas_per_sm, kernel,
-                                                                       NUM_THREADS, smem_size));
-    FLASHINFER_CUDA_CALL(
-        cudaMallocAsync(&cta_counter, sizeof(int) * num_sm * num_ctas_per_sm, stream));
+  if constexpr (FlippedSchedule) {
+    if (cta_counter == nullptr) {
+      FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&num_sm, cudaDevAttrMultiProcessorCount, 0));
+      FLASHINFER_CUDA_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&num_ctas_per_sm, kernel,
+                                                                         NUM_THREADS, smem_size));
+      FLASHINFER_CUDA_CALL(
+          cudaMallocAsync(&cta_counter, sizeof(int) * num_sm * num_ctas_per_sm, stream));
+    }
   }
 
-  void* args[] = {(void*)&params_1, (void*)&params_2, (void*)&cta_counter,
-                  (void*)&flipped_schedule};
+  void* args[] = {(void*)&params_1, (void*)&params_2, (void*)&cta_counter};
 
   FLASHINFER_CUDA_CALL(
       cudaLaunchCooperativeKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
