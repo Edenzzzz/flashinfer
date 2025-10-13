@@ -54,7 +54,7 @@ def run_bench(
         device=device,
     )
 
-    # old
+    # old (skip, the first wrapper suffers significant latency...)
     wrapper_old = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
         torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=device),
         kv_layout="NHD",
@@ -76,10 +76,11 @@ def run_bench(
         kv_data_type=torch.bfloat16,
     )
     end_time = time.perf_counter()
-    measurements_old = bench_gpu_time(
-        lambda: wrapper_old.run(q, kv_data), repeat_iters=repeats
-    )
-    ms_old = np.mean(measurements_old) + (end_time - start_time) * 1000 / NUM_LAYERS
+    # measurements_old = bench_gpu_time(
+    # lambda: wrapper_old.run(q, kv_data), repeat_iters=repeats
+    # )
+    wrapper_old.run(q, kv_data)
+    # ms_old = np.mean(measurements_old) + (end_time - start_time) * 1000 / NUM_LAYERS
 
     # Fused kernel
     wrapper = flashinfer.BatchAttention(kv_layout="NHD")
@@ -298,11 +299,11 @@ def synthesize_seq_len_configs(
 def main(args: argparse.Namespace) -> None:
     np.random.seed(42)
     torch.random.manual_seed(42)
-    decode_len = 16384
-    prefill_len = 8192
-    prefill_chunk_size = 8192
+    decode_len = 1024
+    prefill_len = 4096
+    prefill_chunk_size = 4096
     num_prefill_reqs = 1
-    num_decode_reqs = 0  # 128
+    num_decode_reqs = 8
 
     decode_lens, prefill_lens = synthesize_seq_len_configs(
         decode_len, prefill_len, prefill_chunk_size, num_prefill_reqs, num_decode_reqs
