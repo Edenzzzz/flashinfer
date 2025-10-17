@@ -549,6 +549,7 @@ def main(args: argparse.Namespace) -> None:
         ]
     )
     print(df.to_markdown(index=False, floatfmt=".2f"))
+    df.to_csv("bench_batch_attention.csv", index=False)
 
     # Generate per-model plots if requested
     if args.plot_per_model:

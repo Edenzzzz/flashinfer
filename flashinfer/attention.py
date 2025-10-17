@@ -88,7 +88,7 @@ class BatchAttention:
             logits_soft_cap = 0.0
         self._logits_soft_cap = logits_soft_cap
 
-        # get jit modules for both flipped and non-flipped schedules
+        # get jit module
         get_module_args = (
             q_data_type,
             kv_data_type,

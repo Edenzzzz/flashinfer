@@ -25,7 +25,8 @@ def torch_get_pybind11_abi_build_flags() -> List[str]:
     # NOTE: starting from torch 2.9, this function is no longer needed
     # torch (cuda) version format is now like 2.9.0+cu129, so we need to split the version string
     # and check if the major version is at least 2.9
-    if Version(re.split(r"\+.*", torch.__version__)[0]) >= Version("2.9"):
+    torch_major_version = re.split(r"(\d+\.\d+)", torch.__version__)[1]
+    if Version(torch_major_version) >= Version("2.9"):
         return []
     else:
         abi_cflags = []
@@ -111,7 +112,7 @@ def generate_ninja_build_for_op(
         for extra_dir in extra_include_dirs:
             common_cflags.append(f"-I{extra_dir.resolve()}")
     for sys_dir in system_includes:
-        common_cflags.append(f"-I {sys_dir}")
+        common_cflags.append(f"-isystem {sys_dir}")
 
     cflags = [
         "$common_cflags",
