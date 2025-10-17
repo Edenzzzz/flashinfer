@@ -439,6 +439,7 @@ def get_batch_attention_uri(
         f"posenc_{pos_encoding_mode}_"
         f"use_logits_soft_cap_{str(use_logits_soft_cap).lower()}_"
         f"use_profiler_{str(use_profiler).lower()}"
+        f"flipped_schedule_{str(flipped_schedule).lower()}"
     )
 
 
@@ -1630,6 +1631,7 @@ def gen_customize_batch_attention_module(
         "head_dim_vo": head_dim_vo,
         "pos_encoding_mode": pos_encoding_mode_literal[pos_encoding_mode],
         "use_logits_soft_cap": str(use_logits_soft_cap).lower(),
+        "flipped_schedule": str(flipped_schedule).lower(),
     }
     gen_directory = jit_env.FLASHINFER_GEN_SRC_DIR / uri
     (additional_params_decl, additional_func_params, additional_params_setter) = (
