@@ -538,7 +538,8 @@ def main(args: argparse.Namespace) -> None:
     write_header = append_mode == "w"
     df.to_csv(file_name, index=False, mode=append_mode, header=write_header)
 
-    df = df.drop(
+    # Only drop columns for printing, not for CSV
+    df_print = df.drop(
         columns=[
             "page_size",
             "num_repeats",
@@ -548,8 +549,7 @@ def main(args: argparse.Namespace) -> None:
             "num_decode_reqs",
         ]
     )
-    print(df.to_markdown(index=False, floatfmt=".2f"))
-    df.to_csv("bench_batch_attention.csv", index=False)
+    print(df_print.to_markdown(index=False, floatfmt=".2f"))
 
     # Generate per-model plots if requested
     if args.plot_per_model:
