@@ -8,25 +8,33 @@ set -e  # Exit on any error
 # Array of sequence length combinations
 # Format: "decode_len prefill_len prefill_chunk_size num_prefill_reqs num_decode_reqs"
 seq_configs=(
-    "1024 1024 1024 1 128" # 1k prefill, 1k decode
-    "2048 1024 1024 1 128" # 1k prefill, 2k decode
-    "4096 1024 1024 1 128" # 1k prefill, 4k decode
-    "8192 1024 1024 1 128" # 1k prefill, 8k decode
-    "2048 4096 4096 1 128" # 4k prefill, 2k decode
-    "4096 4096 4096 1 128" # 4k prefill, 4k decode
-    "8192 4096 4096 1 128" # 4k prefill, 8k decode
-    "16384 4096 4096 1 128" # 4k prefill, 16k decode
-    "1024 8192 8192 1 128" # 8k prefill, 1k decode
-    "4096 8192 8192 1 128" # 8k prefill, 4k decode
-    "8192 8192 8192 1 128" # 8k prefill, 8k decode
-    "16384 8192 8192 1 128" # 8k prefill, 16k decode
-    "4096 16384 16384 1 128" # 16k prefill, 4k decode
-    "8192 16384 16384 1 128" # 16k prefill, 8k decode
-    "16384 16384 16384 1 128" # 16k prefill, 16k decode
+    "1024 1024 1024 1 32" # 1k prefill, 1k decode
+    "2048 1024 1024 1 32" # 1k prefill, 2k decode
+    "4096 1024 1024 1 32" # 1k prefill, 4k decode
+    "8192 1024 1024 1 32" # 1k prefill, 8k decode
+    "2048 2048 2048 1 32" # 2k prefill, 2k decode
+    "4096 2048 2048 1 32" # 2k prefill, 4k decode
+    "8192 2048 2048 1 32" # 2k prefill, 8k decode
+    "16384 2048 2048 1 32" # 2k prefill, 16k decode
+    "2048 4096 4096 1 32" # 4k prefill, 2k decode
+    "4096 4096 4096 1 32" # 4k prefill, 4k decode
+    "8192 4096 4096 1 32" # 4k prefill, 8k decode
+    "16384 4096 4096 1 32" # 4k prefill, 16k decode
+    "1024 8192 8192 1 32" # 8k prefill, 1k decode
+    "4096 8192 8192 1 32" # 8k prefill, 4k decode
+    "8192 8192 8192 1 32" # 8k prefill, 8k decode
+    "16384 8192 8192 1 32" # 8k prefill, 16k decode
+    "4096 16384 16384 1 32" # 16k prefill, 4k decode
+    "8192 16384 16384 1 32" # 16k prefill, 8k decode
+    "16384 16384 16384 1 32" # 16k prefill, 16k decode
 
 )
 repeats=100
 save_dir="bench_plots/persistent"
+# remove batch_attention.csv if it exists
+if [ -f "bench_batch_attention.csv" ]; then
+    rm bench_batch_attention.csv
+fi
 
 echo "Starting benchmark runs for all sequence length combinations..."
 echo "Total configurations: ${#seq_configs[@]}"

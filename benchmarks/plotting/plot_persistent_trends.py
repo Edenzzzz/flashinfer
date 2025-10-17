@@ -114,11 +114,17 @@ def plot_persistent_trends(df_all):
                         color=config["color"],
                     )
 
+        # Get num_decode_reqs for filename (should be consistent across all data)
+        num_decode_reqs = (
+            df_all["num_decode_reqs"].iloc[0]
+            if "num_decode_reqs" in df_all.columns
+            else 128
+        )
         # Customize the plot
         plt.xlabel("Decode Length (K tokens)", fontsize=12)
         plt.ylabel("Average Bandwidth (GB/s)", fontsize=12)
         plt.title(
-            f"Bandwidth Trends - {prefill_len // 1024}K Prefill",
+            f"Bandwidth Trends - {prefill_len // 1024}K Prefill, {num_decode_reqs} Decode Reqs",
             fontsize=14,
             fontweight="bold",
         )
@@ -143,9 +149,7 @@ def plot_persistent_trends(df_all):
         plt.tight_layout()
 
         # Save the plot
-        plot_filename = (
-            f"{save_dir}/persistent_trends_{prefill_len // 1024}k_prefill.png"
-        )
+        plot_filename = f"{save_dir}/persistent_trends_{prefill_len // 1024}k_prefill_{num_decode_reqs}_decode_reqs.png"
         plt.savefig(plot_filename, dpi=300, bbox_inches="tight")
         print(f"Trend plot saved as: {plot_filename}")
         plt.show()

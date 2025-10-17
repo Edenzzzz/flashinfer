@@ -442,6 +442,7 @@ def main(args: argparse.Namespace) -> None:
                         "decode_len": decode_len,
                         "prefill_len": prefill_len,
                         "prefill_chunk_size": prefill_chunk_size,
+                        "num_decode_reqs": num_decode_reqs,
                     },
                 ]
             )
@@ -462,6 +463,7 @@ def main(args: argparse.Namespace) -> None:
                         "decode_len": decode_len,
                         "prefill_len": prefill_len,
                         "prefill_chunk_size": prefill_chunk_size,
+                        "num_decode_reqs": num_decode_reqs,
                     },
                 ]
             )
@@ -482,6 +484,7 @@ def main(args: argparse.Namespace) -> None:
                         "decode_len": decode_len,
                         "prefill_len": prefill_len,
                         "prefill_chunk_size": prefill_chunk_size,
+                        "num_decode_reqs": num_decode_reqs,
                     },
                 ]
             )
@@ -502,6 +505,7 @@ def main(args: argparse.Namespace) -> None:
                         "decode_len": decode_len,
                         "prefill_len": prefill_len,
                         "prefill_chunk_size": prefill_chunk_size,
+                        "num_decode_reqs": num_decode_reqs,
                     },
                 ]
             )
@@ -522,6 +526,7 @@ def main(args: argparse.Namespace) -> None:
             "decode_len",
             "prefill_len",
             "prefill_chunk_size",
+            "num_decode_reqs",
         ],
     )
     file_name = "bench_batch_attention.csv"
@@ -533,10 +538,16 @@ def main(args: argparse.Namespace) -> None:
     write_header = append_mode == "w"
     df.to_csv(file_name, index=False, mode=append_mode, header=write_header)
 
-    # remove last 4 columns
-    df = df.iloc[:, :-4]
-    # remove page_size column
-    df = df.drop(columns=["page_size"])
+    df = df.drop(
+        columns=[
+            "page_size",
+            "num_repeats",
+            "decode_len",
+            "prefill_len",
+            "prefill_chunk_size",
+            "num_decode_reqs",
+        ]
+    )
     print(df.to_markdown(index=False, floatfmt=".2f"))
 
     # Generate per-model plots if requested
