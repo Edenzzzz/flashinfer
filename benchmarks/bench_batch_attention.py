@@ -528,12 +528,10 @@ def main(args: argparse.Namespace) -> None:
     if os.path.exists(file_name) and args.overwrite:
         os.remove(file_name)
 
-    if os.path.exists(file_name):
-        # don't save columns
-        df_save = df.drop(columns=df.columns)
-        df_save.to_csv(file_name, index=False, mode="a")
-    else:
-        df.to_csv(file_name, index=False)
+    # Append if file exists; write header only on first write
+    append_mode = "a" if os.path.exists(file_name) else "w"
+    write_header = append_mode == "w"
+    df.to_csv(file_name, index=False, mode=append_mode, header=write_header)
 
     # remove last 4 columns
     df = df.iloc[:, :-4]

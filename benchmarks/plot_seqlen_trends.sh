@@ -22,6 +22,7 @@ seq_configs=(
     "16384 8192 8192 1 128" # 8k prefill, 16k decode
     "4096 16384 16384 1 128" # 16k prefill, 4k decode
     "8192 16384 16384 1 128" # 16k prefill, 8k decode
+    "16384 16384 16384 1 128" # 16k prefill, 16k decode
 
 )
 repeats=100

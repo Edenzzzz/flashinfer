@@ -19,7 +19,7 @@ def plot_persistent_trends(df_all):
 
     # Get unique prefill lengths and decode lengths
     prefill_lengths = sorted(df_all["prefill_len"].unique())
-    decode_lengths = sorted(df_all["decode_len"].unique())
+    # decode_lengths = sorted(df_all["decode_len"].unique())
 
     # Color and style mapping for schedulers (same as in plot_persistent_individual.py)
     scheduler_config = {
@@ -35,7 +35,7 @@ def plot_persistent_trends(df_all):
         },
         "BatchPrefillWithPagedKVCacheWrapper": {
             "color": "#ff7f0e",
-            "label": "Batch Prefill (SGL)",
+            "label": "Batch Prefill (SGLang)",
             "marker": "^",
         },
         "Decode + Prefill": {
@@ -55,8 +55,15 @@ def plot_persistent_trends(df_all):
         # Filter data for this prefill length
         prefill_data = df_all[df_all["prefill_len"] == prefill_len]
 
-        # Get unique schedulers for this prefill length
-        schedulers = prefill_data["scheduler"].unique()
+        # Get schedulers in the desired legend/order if present in data
+        desired_order = [
+            "BatchAttentionWrapper (flipped)",
+            "BatchAttentionWrapper",
+            "BatchPrefillWithPagedKVCacheWrapper",
+            "Decode + Prefill",
+        ]
+        present = set(prefill_data["scheduler"].unique())
+        schedulers = [s for s in desired_order if s in present]
 
         # Plot lines for each scheduler
         for scheduler in schedulers:
@@ -108,17 +115,20 @@ def plot_persistent_trends(df_all):
                     )
 
         # Customize the plot
-        plt.xlabel("Decode Length (k tokens)", fontsize=12)
+        plt.xlabel("Decode Length (K tokens)", fontsize=12)
         plt.ylabel("Average Bandwidth (GB/s)", fontsize=12)
         plt.title(
-            f"Bandwidth Trends - Prefill Length: {prefill_len // 1024}k tokens",
+            f"Bandwidth Trends - {prefill_len // 1024}K Prefill",
             fontsize=14,
             fontweight="bold",
         )
 
-        # Set x-axis ticks to show all decode lengths
-        decode_ticks = [d // 1024 for d in decode_lengths if d > 0]
-        plt.xticks(decode_ticks)
+        # Set x-axis ticks based on actual decode lengths present for this prefill length
+        decode_ticks = sorted(
+            {int(d) // 1024 for d in prefill_data["decode_len"].unique() if d > 0}
+        )
+        if decode_ticks:
+            plt.xticks(decode_ticks)
 
         # Add grid for better readability
         plt.grid(True, alpha=0.3, linestyle="--")

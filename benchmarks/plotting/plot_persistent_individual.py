@@ -178,7 +178,7 @@ def plot_original_comparison(df_all):
             x + offsets[2],
             batch_prefill_values,
             width,
-            label="Batch Prefill (SGL)",
+            label="Batch Prefill (SGLang)",
             color="#ff7f0e",
         )
         bars4 = plt.bar(
