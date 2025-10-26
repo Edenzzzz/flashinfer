@@ -566,7 +566,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_prefill_reqs", type=int, default=1)
     parser.add_argument("--num_decode_reqs", type=int, default=128)
     parser.add_argument("--decode_len", type=int, default=8192)
-    parser.add_argument("--prefill_len", type=int, default=8192)
+    parser.add_argument("--prefill_len", type=int, default=4096)
     parser.add_argument(
         "--plot_per_model",
         action="store_true",

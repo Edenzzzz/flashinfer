@@ -1038,9 +1038,10 @@ struct HolisticPlanInfo {
   int64_t merge_indptr_offset;
   int64_t merge_o_indices_offset;
   int64_t num_qo_len_offset;
+  bool flipped_schedule;
 
   static constexpr uint32_t NUM_TASK_ARGS = 10;
-  static constexpr uint32_t NUM_SHARED_ARGS = 8;
+  static constexpr uint32_t NUM_SHARED_ARGS = 9;
 
   std::vector<int64_t> ToVector() const {
     std::vector<int64_t> vec;
@@ -1064,6 +1065,7 @@ struct HolisticPlanInfo {
     vec.push_back(merge_indptr_offset);
     vec.push_back(merge_o_indices_offset);
     vec.push_back(num_qo_len_offset);
+    vec.push_back(flipped_schedule);
     return vec;
   }
 
@@ -1094,6 +1096,7 @@ struct HolisticPlanInfo {
     merge_indptr_offset = vec[5 + NUM_TASKS * NUM_TASK_ARGS];
     merge_o_indices_offset = vec[6 + NUM_TASKS * NUM_TASK_ARGS];
     num_qo_len_offset = vec[7 + NUM_TASKS * NUM_TASK_ARGS];
+    flipped_schedule = vec[8 + NUM_TASKS * NUM_TASK_ARGS];
   }
 };
 
@@ -1104,8 +1107,8 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
                                         HolisticPlanInfo<2>& plan_info, IdType* qo_indptr_h,
                                         IdType* kv_indptr_h, IdType* kv_len_arr_h,
                                         uint32_t batch_size, uint32_t num_qo_heads,
-                                        uint32_t num_kv_heads, uint32_t head_dim, bool causal,
-                                        cudaStream_t stream) {
+                                        uint32_t num_kv_heads, uint32_t head_dim,
+                                        uint32_t page_size, bool causal, cudaStream_t stream) {
   constexpr uint32_t NUM_TASKS = 2;
   const uint32_t CTA_TILE_Q_SIZES[NUM_TASKS] = {128, 16};
   int num_sm = 0;
@@ -1126,6 +1129,7 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
 
   // step 0. determine the number of blocks in x and y dimensions
   std::vector<std::tuple<int, int, int>> idx_qo_kv_len_vec[NUM_TASKS];
+  uint32_t total_prefill_len = 0, total_decode_len = 0;
   for (uint32_t i = 0; i < batch_size; ++i) {
     if (qo_indptr_h[i + 1] - qo_indptr_h[i] < 0) {
       std::ostringstream err_msg;
@@ -1138,11 +1142,22 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
     int packed_qo_len = qo_len * gqa_group_size;
     int kv_len = kv_len_arr_h[i];
 
+    // For flipped schedule decision
+    if (qo_len >= CTA_TILE_Q_SIZES[0]) {
+      total_prefill_len += qo_len;
+    } else {
+      total_decode_len += kv_len * page_size;
+    }
     if (packed_qo_len > CTA_TILE_Q_SIZES[1]) {
       idx_qo_kv_len_vec[0].push_back({i, qo_len, kv_len});
     } else {
       idx_qo_kv_len_vec[1].push_back({i, qo_len, kv_len});
     }
+  }
+  if (total_prefill_len >= total_decode_len * 128) {
+    plan_info.flipped_schedule = true;
+  } else {
+    plan_info.flipped_schedule = false;
   }
 
   int cluster_size = 1;

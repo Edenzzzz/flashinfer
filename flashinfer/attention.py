@@ -82,14 +82,15 @@ class BatchAttention:
         q_data_type: torch.dtype = torch.bfloat16,
         kv_data_type: torch.dtype = torch.bfloat16,
         use_profiler: bool = False,
-        flipped_schedule: bool = False,
+        # flipped_schedule: bool = False,
     ) -> None:
         if logits_soft_cap is None:
             logits_soft_cap = 0.0
         self._logits_soft_cap = logits_soft_cap
 
         # get jit module
-        get_module_args = (
+        flipped_schedule = False
+        get_module_args = [
             q_data_type,
             kv_data_type,
             q_data_type,
@@ -100,7 +101,7 @@ class BatchAttention:
             logits_soft_cap > 0.0,
             use_profiler,  # different compiler path
             flipped_schedule,
-        )
+        ]
         self.module = get_holistic_attention_module(*get_module_args)
 
         qo_indptr_host = qo_indptr.to(torch.device("cpu"), non_blocking=True)
@@ -131,8 +132,13 @@ class BatchAttention:
             num_qo_heads,
             num_kv_heads,
             head_dim_vo,
+            page_size,
             causal,
         )
+        self._flipped_schedule = bool(self._plan_info[-1])
+        if self._flipped_schedule != flipped_schedule:
+            get_module_args[-1] = self._flipped_schedule
+            self.module = get_holistic_attention_module(*get_module_args)
 
     def run(
         self,
@@ -144,7 +150,6 @@ class BatchAttention:
         v_scale: Optional[torch.Tensor] = None,
         logits_soft_cap: float = 0.0,
         profiler_buffer: Optional[torch.Tensor] = None,
-        flipped_schedule: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if profiler_buffer is None:
             if self._use_profiler:
@@ -175,9 +180,7 @@ class BatchAttention:
         # profiler_buffer is optional
         profiler_args = (profiler_buffer,) if self._use_profiler else ()
 
-        # Select the appropriate module based on flipped_schedule
         module = self.module
-
         module.run(
             self.float_workspace_buffer,
             self.int_workspace_buffer,

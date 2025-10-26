@@ -21,7 +21,7 @@ at::Tensor BatchPagedAttentionPlan(at::Tensor float_workspace_buffer,
                                    at::Tensor page_locked_int_workspace_buffer,
                                    at::Tensor qo_indptr, at::Tensor kv_indptr, at::Tensor kv_len,
                                    int64_t batch_size, int64_t num_qo_heads, int64_t num_kv_heads,
-                                   int64_t head_dim_o, bool causal);
+                                   int64_t head_dim_o, int64_t page_size, bool causal);
 
 void BatchPagedAttentionRun(at::Tensor float_workspace_buffer, at::Tensor int_workspace_buffer,
                             at::Tensor plan_info_vec, at::Tensor q, at::Tensor k_cache,
