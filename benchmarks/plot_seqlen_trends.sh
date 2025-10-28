@@ -91,7 +91,7 @@ python3 benchmarks/plotting/plot_persistent_trends.py
 if [ $? -eq 0 ]; then
     echo "✓ Trend plots generated successfully"
     echo "Generated trend plots:"
-    ls -la ${save_dir}/persistent_trends_*.png
+    ls -la ${save_dir}/trends_*.png
 else
     echo "✗ Failed to generate trend plots"
 fi

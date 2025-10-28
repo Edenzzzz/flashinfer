@@ -91,7 +91,7 @@ def run_bench(
     wrapper = flashinfer.BatchAttention(kv_layout="NHD")
 
     # Normal schedule
-    def persistent_plan(flipped_schedule: bool):
+    def persistent_plan(flipped_schedule: bool = None):
         wrapper.plan(
             q_indptr.to(device),
             kv_indptr.to(device),

@@ -82,14 +82,14 @@ class BatchAttention:
         q_data_type: torch.dtype = torch.bfloat16,
         kv_data_type: torch.dtype = torch.bfloat16,
         use_profiler: bool = False,
-        # flipped_schedule: bool = False,
+        flipped_schedule: bool = None,  # If None, auto-schedule based on prefill-decode ratio
     ) -> None:
         if logits_soft_cap is None:
             logits_soft_cap = 0.0
         self._logits_soft_cap = logits_soft_cap
 
         # get jit module
-        flipped_schedule = False
+        schedule_placeholder = False if flipped_schedule is None else flipped_schedule
         get_module_args = [
             q_data_type,
             kv_data_type,
@@ -100,7 +100,7 @@ class BatchAttention:
             PosEncodingMode["NONE"].value,
             logits_soft_cap > 0.0,
             use_profiler,  # different compiler path
-            flipped_schedule,
+            schedule_placeholder,  # flipped_schedule
         ]
         self.module = get_holistic_attention_module(*get_module_args)
 
@@ -135,9 +135,9 @@ class BatchAttention:
             page_size,
             causal,
         )
-        self._flipped_schedule = bool(self._plan_info[-1])
-        if self._flipped_schedule != flipped_schedule:
-            get_module_args[-1] = self._flipped_schedule
+        flipped_schedule = bool(self._plan_info[-1])
+        if flipped_schedule != schedule_placeholder and flipped_schedule is None:
+            get_module_args[-1] = flipped_schedule
             self.module = get_holistic_attention_module(*get_module_args)
 
     def run(
