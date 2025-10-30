@@ -141,9 +141,44 @@ def run_bench(
             )
         )
         ms_pod = np.median(measurements)
+        # Sequential two kernels: single prefill + batch decode (tensor cores)
+        # Prefill using single_prefill_with_kv_cache
+        def _run_single_prefill():
+            return flashinfer.prefill.single_prefill_with_kv_cache(
+                q_p,
+                k_p,
+                v_p,
+                causal=causal,
+                pos_encoding_mode="NONE",
+                backend="fa2",
+            )
+
+        measurements_prefill = bench_gpu_time(lambda: _run_single_prefill())
+        ms_prefill = np.median(measurements_prefill)
+
+        # Batch decode using tensor cores
+        wrapper_decode = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
+            workspace_buffer, kv_layout=kv_layout, use_tensor_cores=True
+        )
+        wrapper_decode.plan(
+            d_kv_indptr.to(device),
+            kv_indices_d.to(device),
+            last_page_len_d,
+            num_qo_heads,
+            num_kv_heads,
+            head_dim,
+            page_block_size,
+            data_type=torch.bfloat16,
+            q_data_type=torch.bfloat16,
+        )
+        measurements_decode = bench_gpu_time(lambda: wrapper_decode.run(q_d, kv_d))
+        ms_decode = np.median(measurements_decode)
+        ms_seq_two_kernels = ms_prefill + ms_decode
+        
     print(f"Elapsed time (Batched Prefill): {ms_old:.2f} ms")
     if len(p_kv_lens) == 1:
         print(f"Elapsed time (POD Attention): {ms_pod:.2f} ms")
+        print(f"Elapsed time (Sequential two kernels): {ms_seq_two_kernels:.2f} ms")
     print(f"Elapsed time (Persistent BatchAttention): {ms_persistent:.2f} ms")
     total_bytes = (
         q.numel() * q.element_size() + kv_data.numel() * kv_data.element_size()
@@ -156,6 +191,10 @@ def run_bench(
     if len(p_kv_lens) == 1:
         bandwidth_pod_gb_s = total_bytes / (ms_pod * 1e-3) / (1024**3)
         print(f"Memory bandwidth (POD Attention): {bandwidth_pod_gb_s:.2f} GB/s")
+        bandwidth_seq_gb_s = total_bytes / (ms_seq_two_kernels * 1e-3) / (1024**3)
+        print(
+            f"Memory bandwidth (Sequential two kernels): {bandwidth_seq_gb_s:.2f} GB/s"
+        )
     bandwidth_persistent_gb_s = total_bytes / (ms_persistent * 1e-3) / (1024**3)
     print(
         f"Memory bandwidth (Persistent BatchAttention): {bandwidth_persistent_gb_s:.2f} GB/s"
@@ -167,70 +206,14 @@ if __name__ == "__main__":
     torch.random.manual_seed(42)
 
     # Irregular sequence lengths for prefill and decode
-    d_q_len_configs = [[1] * 122, [1] * 128, [1] * 242, [1] * 256]
-    d_kv_len_configs = [[600] * 122, [10000] * 128, [400] * 242, [8192] * 256]
-    p_q_configs = [[17] * 1, [10000], [17] * 1, []]
-    p_kv_configs = [[10000] * 1, [10000], [8192] * 1, []]
-
-    # construct random length testcases
-    # for _ in range(1):
-    #     bsz = 256
-    #     stride = 16
-    #     sparsity = 0.05
-
-    #     full_kv_len = np.random.randint(1000, 8192, size=bsz)
-    #     p_q_lens = []
-    #     p_kv_lens = []
-    #     d_q_lens = []
-    #     d_kv_lens = []
-    #     for i in range(bsz):
-    #         if i % stride == 0:
-    #             kv_len = full_kv_len[i]
-    #             qo_len = stride + 1
-    #             p_q_lens.append(qo_len)
-    #             p_kv_lens.append(kv_len)
-    #         else:
-    #             kv_len = int(full_kv_len[i] * sparsity)
-    #             qo_len = 1
-    #             d_q_lens.append(qo_len)
-    #             d_kv_lens.append(kv_len)
-
-    #     p_q_configs.append(p_q_lens)
-    #     p_kv_configs.append(p_kv_lens)
-    #     d_q_len_configs.append(d_q_lens)
-    #     d_kv_len_configs.append(d_kv_lens)
-
-    # for _ in range(1):
-    #     bsz = 128
-    #     stride = 16
-    #     sparsity = 0.05
-
-    #     full_kv_len = np.random.randint(2000, 16000, size=bsz)
-    #     p_q_lens = []
-    #     p_kv_lens = []
-    #     d_q_lens = []
-    #     d_kv_lens = []
-
-    #     for i in range(bsz):
-    #         if i % stride == 0:
-    #             kv_len = full_kv_len[i]
-    #             qo_len = stride + 1
-    #             p_q_lens.append(qo_len)
-    #             p_kv_lens.append(kv_len)
-    #         else:
-    #             kv_len = int(full_kv_len[i] * sparsity)
-    #             qo_len = 1
-    #             d_q_lens.append(qo_len)
-    #             d_kv_lens.append(kv_len)
-
-    #     p_q_configs.append(p_q_lens)
-    #     p_kv_configs.append(p_kv_lens)
-    #     d_q_len_configs.append(d_q_lens)
-    #     d_kv_len_configs.append(d_kv_lens)
+    d_q_len_configs = [[1] * 128, [1] * 128, [1] * 128, [1] * 128]
+    d_kv_len_configs = [[2048] * 128, [4096] * 128, [8192] * 128, [8192] * 128]
+    p_q_configs = [[2048], [4096], [4096], [6000]]
+    p_kv_configs = [[2048], [4096], [4096], [7000]]
 
     page_block_size = 1
-    num_kv_heads = 4
-    num_qo_heads = 28
+    num_kv_heads = 8
+    num_qo_heads = 32
     head_dim = 128
 
     for idx, (p_q_lens, p_kv_lens, d_q_len, d_kv_len) in enumerate(
