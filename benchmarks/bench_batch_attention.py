@@ -119,7 +119,6 @@ def run_bench(
     ms_new_normal = (
         np.mean(measurements_new_normal) + (end_time - start_time) * 1000 / NUM_LAYERS
     )
-    o, _ = wrapper.run(q, kv_data)
 
     # Overlap schedule
     persistent_plan(True)  # warmup module loading
@@ -133,7 +132,6 @@ def run_bench(
     ms_new_flipped = (
         np.mean(measurements_new_flipped) + (end_time - start_time) * 1000 / NUM_LAYERS
     )
-
     # Separate prefill and decode wrappers
     q_lens_d = torch.tensor(decode_qo_lens, dtype=torch.int32, device=device)
     q_indptr_d = torch.cat(

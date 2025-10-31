@@ -1154,7 +1154,7 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
       idx_qo_kv_len_vec[1].push_back({i, qo_len, kv_len});
     }
   }
-  if (total_prefill_len >= total_decode_len * 128) {
+  if (total_prefill_len * 128 <= total_decode_len && total_prefill_len >= 4096) {
     plan_info.flipped_schedule = true;
   } else {
     plan_info.flipped_schedule = false;

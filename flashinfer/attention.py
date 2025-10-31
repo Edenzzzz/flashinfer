@@ -135,10 +135,10 @@ class BatchAttention:
             page_size,
             causal,
         )
-        flipped_schedule = bool(self._plan_info[-1])
-        if flipped_schedule != schedule_placeholder and flipped_schedule is None:
-            get_module_args[-1] = flipped_schedule
-            self.module = get_holistic_attention_module(*get_module_args)
+        # recommended_schedule = bool(self._plan_info[-1])
+        # if recommended_schedule != schedule_placeholder and flipped_schedule is None:
+        #     get_module_args[-1] = recommended_schedule
+        #     self.module = get_holistic_attention_module(*get_module_args)
 
     def run(
         self,
