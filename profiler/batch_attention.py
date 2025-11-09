@@ -181,16 +181,14 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # seq_len_config = [(600, 1)] * 122 + [(10000, 17)] * 8
-    seq_len_config = [(8192, 1)] * 127 * 2 + [
-        (8192, 4096)
-    ] * 1  # hybrid (chunked-prefill)
+    seq_len_config = [(8192, 1)] * 128 + [(4096, 4096)] * 1  # hybrid (chunked-prefill)
 
     kv_lens = [p[0] for p in seq_len_config]
     qo_lens = [p[1] for p in seq_len_config]
 
     page_size = 1
-    num_kv_heads = 4
-    num_qo_heads = 28
+    num_kv_heads = 8
+    num_qo_heads = 32
     head_dim = 128
     layout = "NHD"
     test_dtype = torch.bfloat16

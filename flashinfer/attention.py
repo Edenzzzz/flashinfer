@@ -64,6 +64,8 @@ class BatchAttention:
             device=torch.device("cpu"),
             pin_memory=True,
         )
+        self.forward_count = 0
+        self.flipped_count = 0
 
     def plan(
         self,
@@ -89,7 +91,7 @@ class BatchAttention:
         self._logits_soft_cap = logits_soft_cap
 
         # get jit module
-        schedule_placeholder = False if flipped_schedule is None else flipped_schedule
+        schedule_placeholder = True if flipped_schedule is None else flipped_schedule
         get_module_args = [
             q_data_type,
             kv_data_type,
@@ -135,10 +137,14 @@ class BatchAttention:
             page_size,
             causal,
         )
-        # recommended_schedule = bool(self._plan_info[-1])
+        recommended_schedule = bool(self._plan_info[-1])
+        if recommended_schedule != schedule_placeholder and flipped_schedule is None:
+            get_module_args[-1] = recommended_schedule
+            self.module = get_holistic_attention_module(*get_module_args)
+        # self.forward_count += 1
         # if recommended_schedule != schedule_placeholder and flipped_schedule is None:
-        #     get_module_args[-1] = recommended_schedule
-        #     self.module = get_holistic_attention_module(*get_module_args)
+        #     self.flipped_count += 1
+        #     print(f"forward {self.forward_count}, recommended schedule is {recommended_schedule} ({self.flipped_count}/{self.forward_count})")
 
     def run(
         self,

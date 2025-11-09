@@ -9,7 +9,10 @@ import pandas as pd
 import torch
 import time
 import flashinfer
-from flashinfer.testing.utils import bench_gpu_time
+from flashinfer.testing.utils import (
+    bench_gpu_time,
+    attention_flops_with_actual_seq_lens,
+)
 import matplotlib.pyplot as plt
 
 NUM_LAYERS = 36  # QWen3 8b
@@ -30,11 +33,11 @@ def run_bench(
     repeats: int = 50,
 ) -> Tuple[float, float, float, float, float, float, float, float, float]:
     kv_lens = list(decode_kv_lens) + list(prefill_kv_lens)
-    seq_lens = torch.tensor(kv_lens, dtype=torch.int32)
+    kv_lens = torch.tensor(kv_lens, dtype=torch.int32)
     q_lens = torch.tensor(
         list(decode_qo_lens) + list(prefill_qo_lens), dtype=torch.int32
     )
-    seq_lens_blocks = torch.ceil(seq_lens / page_block_size).int()
+    seq_lens_blocks = torch.ceil(kv_lens / page_block_size).int()
 
     q_indptr = torch.cat([torch.tensor([0]), torch.cumsum(q_lens, 0)], dim=0).int()
     kv_indptr = torch.cat(
@@ -61,7 +64,7 @@ def run_bench(
         kv_layout="NHD",
         backend="fa2",
     )
-    last_page_len = (seq_lens - 1) % page_block_size + 1
+    last_page_len = (kv_lens - 1) % page_block_size + 1
 
     def old_plan():
         wrapper_old.plan(
@@ -96,7 +99,7 @@ def run_bench(
             q_indptr.to(device),
             kv_indptr.to(device),
             torch.arange(num_blocks, dtype=torch.int32, device=device),
-            seq_lens.to(device),
+            kv_lens.to(device),
             num_qo_heads,
             num_kv_heads,
             head_dim,
@@ -224,6 +227,12 @@ def run_bench(
     else:
         ms_prefill = 0
 
+    def tflops(ms):
+        total_flops = attention_flops_with_actual_seq_lens(
+            q_lens, kv_lens, head_dim, head_dim, num_qo_heads, causal
+        )
+        return total_flops / ms / 1e9
+
     ms_separate = ms_prefill + ms_decode
 
     total_bytes = (
@@ -234,7 +243,10 @@ def run_bench(
     bw_new_normal = total_bytes / (ms_new_normal * 1e-3) / 1024**3
     bw_new_flipped = total_bytes / (ms_new_flipped * 1e-3) / 1024**3
     bw_separate = total_bytes / (ms_separate * 1e-3) / 1024**3
-
+    tflops_old = tflops(ms_old)
+    tflops_new_normal = tflops(ms_new_normal)
+    tflops_new_flipped = tflops(ms_new_flipped)
+    tflops_separate = tflops(ms_separate)
     return (
         ms_old,
         ms_new_normal,
@@ -245,6 +257,10 @@ def run_bench(
         bw_new_normal,
         bw_new_flipped,
         bw_separate,
+        tflops_old,
+        tflops_new_normal,
+        tflops_new_flipped,
+        tflops_separate,
     )  # type: ignore
 
 
@@ -410,6 +426,10 @@ def main(args: argparse.Namespace) -> None:
                 bw_new_normal,
                 bw_new_flipped,
                 bw_separate,
+                tflops_old,
+                tflops_new_normal,
+                tflops_new_flipped,
+                tflops_separate,
             ) = run_bench(
                 decode_kv_lens,
                 decode_qo_lens,
@@ -441,6 +461,7 @@ def main(args: argparse.Namespace) -> None:
                         "prefill_len": prefill_len,
                         "prefill_chunk_size": prefill_chunk_size,
                         "num_decode_reqs": num_decode_reqs,
+                        "tflops": tflops_old,
                     },
                 ]
             )
@@ -462,6 +483,7 @@ def main(args: argparse.Namespace) -> None:
                         "prefill_len": prefill_len,
                         "prefill_chunk_size": prefill_chunk_size,
                         "num_decode_reqs": num_decode_reqs,
+                        "tflops": tflops_new_normal,
                     },
                 ]
             )
@@ -483,6 +505,7 @@ def main(args: argparse.Namespace) -> None:
                         "prefill_len": prefill_len,
                         "prefill_chunk_size": prefill_chunk_size,
                         "num_decode_reqs": num_decode_reqs,
+                        "tflops": tflops_new_flipped,
                     },
                 ]
             )
@@ -504,6 +527,7 @@ def main(args: argparse.Namespace) -> None:
                         "prefill_len": prefill_len,
                         "prefill_chunk_size": prefill_chunk_size,
                         "num_decode_reqs": num_decode_reqs,
+                        "tflops": tflops_separate,
                     },
                 ]
             )
@@ -525,6 +549,7 @@ def main(args: argparse.Namespace) -> None:
             "prefill_len",
             "prefill_chunk_size",
             "num_decode_reqs",
+            "tflops",
         ],
     )
     file_name = "bench_batch_attention.csv"
