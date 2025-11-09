@@ -94,10 +94,19 @@ def profile_persistent_batch_attention(
     )
 
     # warmup
-    wrapper.run(q, kv_data, profiler_buffer=profiler_buffer, flipped_schedule=flipped)
+    start_event, end_event = (
+        torch.cuda.Event(enable_timing=True),
+        torch.cuda.Event(enable_timing=True),
+    )
+    wrapper.run(q, kv_data, profiler_buffer=profiler_buffer)
     profiler_buffer.zero_()
 
-    wrapper.run(q, kv_data, profiler_buffer=profiler_buffer, flipped_schedule=flipped)
+    torch.cuda.synchronize()
+    start_event.record()
+    wrapper.run(q, kv_data, profiler_buffer=profiler_buffer)
+    end_event.record()
+    end_event.synchronize()
+    print(f"Kernel execution time: {start_event.elapsed_time(end_event)} ms")
 
     trace_name = "batch_attention.perfetto-trace"
     events = ["prefill", "decode", "reduction"]
@@ -169,8 +178,9 @@ def persistent_batch_attention(
         causal=causal,
         q_data_type=test_dtype,
         kv_data_type=test_dtype,
+        flipped_schedule=flipped,
     )
-    wrapper.run(q, kv_data, flipped_schedule=flipped)
+    wrapper.run(q, kv_data)
 
 
 if __name__ == "__main__":
