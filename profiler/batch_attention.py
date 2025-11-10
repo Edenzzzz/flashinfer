@@ -87,6 +87,7 @@ def profile_persistent_batch_attention(
         q_data_type=test_dtype,
         kv_data_type=test_dtype,
         use_profiler=True,
+        flipped_schedule=flipped,
     )
 
     profiler_buffer = torch.zeros(
@@ -185,7 +186,7 @@ def persistent_batch_attention(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--profiler-buffer-size", type=int, default=1048576)
+    parser.add_argument("--profiler-buffer-size", type=int, default=3048576)
     parser.add_argument("--use-profiler", action="store_true")
     parser.add_argument("--flipped", action="store_true")
     args = parser.parse_args()

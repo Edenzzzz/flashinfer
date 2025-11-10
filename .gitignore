@@ -20,7 +20,7 @@ csrc/aot_default_additional_params.h
 
 # Microbenchmark files
 microbenchmark/
-
+*.perfetto-trace
 # vscode
 .vscode/
 
