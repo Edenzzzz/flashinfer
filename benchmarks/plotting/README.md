@@ -6,10 +6,10 @@ python benchmarks/plotting/plot_persistent_individual.py
 
 ## Profile all individual seqlens
 ```
-bash benchmarks/plot_individual_seqlens.sh
+bash benchmarks/plot_persistent_individual.sh
 ```
 
 ## Profile throughput trends (fix prefill seqlen and vary decode seqlen)
 ```
-bash benchmarks/plot_seqlen_trends.sh
+bash benchmarks/plot_persistent_trends.sh
 ```
