@@ -17,13 +17,10 @@ name = "flashinfer-python"
 description = "FlashInfer: Kernel Library for LLM Serving"
 requires-python = ">=3.9,<4.0"
 authors = [{ name = "FlashInfer team" }]
-#license = "Apache-2.0"
-license = {file = "LICENSE" }
+license = {text = "Apache-2.0"}
 readme = "README.md"
 urls = { Homepage = "https://github.com/flashinfer-ai/flashinfer" }
 dynamic = ["dependencies", "version"]
-#license-files = ["LICENSE", "licenses/*"]
-
 
 
 [build-system]
@@ -41,7 +38,6 @@ skip = [
 ]
 
 [tool.setuptools]
-license-files = ["LICENSE", "licenses/*"]
 packages = [
     "flashinfer",
     "flashinfer.cute_dsl",
@@ -67,6 +63,12 @@ packages = [
     "flashinfer.logits_processor",
 ]
 include-package-data = false
+py-modules = ["build_backend", "build_utils"]
+license-files = ["LICENSE", "LICENSE*.txt"]
+
+[tool.setuptools.dynamic]
+version = {attr = "flashinfer._build_meta.__version__"}
+dependencies = {file = ["requirements.txt"]}
 
 [tool.setuptools.package-dir]
 "flashinfer.data" = "."
