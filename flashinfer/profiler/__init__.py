@@ -53,24 +53,44 @@ def export_to_perfetto_trace(
     profiler_buffer: torch.Tensor,
     event_names: List[str],
     file_name: str,
+    record_seqlen: bool = False,
 ) -> None:
     assert profiler_buffer.dtype == torch.uint64
     profiler_buffer_host = profiler_buffer.cpu()
-    num_blocks, num_groups = profiler_buffer_host[:1].view(dtype=torch.int32)
+
+    if not record_seqlen:
+        num_blocks, num_groups = profiler_buffer_host[:1].view(dtype=torch.int32)
+        start_idx = 1
+        step = 1
+    else:
+        num_blocks, num_groups, _, _ = profiler_buffer_host[:2].view(dtype=torch.int32)
+        start_idx = 2
+        step = 2
+
     num_blocks = int(num_blocks)
     num_groups = int(num_groups)
-    tgen = TraceGenerator(file_name)
 
+    tgen = TraceGenerator(file_name)
     pid_map = {}
     tid_map = {}
     track_map: Dict[Tuple[int, int, int], Any] = {}
 
-    for i in range(1, len(profiler_buffer_host)):
-        if profiler_buffer_host[i] == 0:
+    for i in range(start_idx, len(profiler_buffer_host), step):
+        word0 = profiler_buffer_host[i]
+        if word0 == 0:
             continue
+
         tag, timestamp = profiler_buffer_host[i : i + 1].view(dtype=torch.uint32)
         tag = int(tag)
         timestamp = int(timestamp)
+
+        if record_seqlen:
+            word1 = profiler_buffer_host[i + 1]
+            qo_len, kv_len, _, _ = word1.view(dtype=torch.uint16)
+            qo_len = int(qo_len)
+            kv_len = int(kv_len)
+            # TODO: attach (qo_len, kv_len) to Perfetto event if you care
+
         block_idx, group_idx, event_idx, event_type, sm_id = decode_tag(
             tag, num_blocks, num_groups
         )
@@ -79,9 +99,11 @@ def export_to_perfetto_trace(
         if block_idx not in pid_map:
             pid_map[block_idx] = tgen.create_group(f"sm_{sm_id}_block_{block_idx}")
         pid = pid_map[block_idx]
+
         if (block_idx, group_idx) not in tid_map:
             tid_map[(block_idx, group_idx)] = pid.create_group(f"group_{group_idx}")
         tid = tid_map[(block_idx, group_idx)]
+
         event = event_names[event_idx]
 
         if (block_idx, group_idx, event_idx) in track_map:

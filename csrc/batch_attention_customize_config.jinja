@@ -27,7 +27,8 @@ struct StandardAttention : AttentionVariantBase {
   float sm_scale_log2;
   float soft_cap_pre_tanh_scale;
   static constexpr bool use_logits_soft_cap = UseLogitsSoftCap;
-  PROFILER_CLOSURE_PARAMS_DECL
+  // PROFILER_CLOSURE_PARAMS_DECL
+  PROFILER_CLOSURE_SEQLEN_PARAMS_DECL
 
   template <typename Params>
   __device__ __host__ StandardAttention(const Params& params, uint32_t batch_idx,
@@ -114,5 +115,6 @@ struct PersistentParams {
   float v_scale;
   {{ additional_params_decl }}
 
-  PROFILER_PARAMS_DECL
+  // PROFILER_PARAMS_DECL
+  PROFILER_PARAMS_DECL_SEQLEN
 };

@@ -73,6 +73,28 @@ struct ProfilerEntry {
   };
 };
 
+struct __align__(16) ProfilerSeqlenEntry {
+  union {
+    struct {  // header form
+      uint32_t nblocks;
+      uint32_t ngroups;
+      uint32_t dummy0;
+      uint32_t dummy1;
+    } header;
+
+    struct {  // event form
+      uint32_t tag;
+      uint32_t delta_time;
+      uint16_t qo_len;
+      uint16_t kv_len;
+      uint16_t pad0;   // pad to 16 bytes total
+      uint16_t pad1;
+    } event;
+
+    ulonglong2 raw2;   // 128-bit raw view: two 64-bit words
+  };
+};
+
 #ifdef FLASHINFER_ENABLE_PROFILER
 #define PROFILER_CLOSURE_PARAMS_DECL \
   ProfilerEntry entry;               \
@@ -81,10 +103,18 @@ struct ProfilerEntry {
   uint32_t profiler_entry_tag_base;  \
   bool profiler_write_thread_predicate;
 
+#define PROFILER_CLOSURE_SEQLEN_PARAMS_DECL \
+ProfilerSeqlenEntry entry;               \
+ulonglong2* profiler_write_ptr;    \
+uint32_t    profiler_write_stride; \
+uint32_t    profiler_entry_tag_base; \
+bool        profiler_write_thread_predicate;
+
 #define PROFILER_CLOSURE_FUNC_PARAMS , ProfilerClosure& profiler_closure
 
 #define PROFILER_FUNC_PARAMS , at::Tensor profiler_buffer
 #define PROFILER_PARAMS_DECL uint64_t* profiler_buffer;
+#define PROFILER_PARAMS_DECL_SEQLEN ulonglong2* profiler_buffer;
 
 #define PROFILER_INIT(params, smem_storage, closure, group_idx, num_groups,     \
                       write_thread_predicate)                                   \
@@ -111,6 +141,40 @@ struct ProfilerEntry {
   }                                                                                           \
   __threadfence_block();
 
+
+#define PROFILER_INIT_WITH_LEN(params, smem_storage, closure, group_idx, num_groups, write_thread_predicate) \
+  uint32_t _sm_idx;                                                                                 \
+  asm volatile("mov.u32 %0, %smid;" : "=r"(_sm_idx));                                               \
+  if (get_block_idx() == 0 && get_thread_idx() == 0) {                                              \
+    (closure).entry.header.nblocks = get_num_blocks();                                              \
+    (closure).entry.header.ngroups = num_groups;                                                    \
+    (closure).entry.header.dummy0  = 0;                                                             \
+    (closure).entry.header.dummy1  = 0;                                                             \
+    reinterpret_cast<ulonglong2*>(params.profiler_buffer)[0] = (closure).entry.raw2;               \
+  }                                                                                                 \
+  (closure).profiler_write_ptr =                                                                    \
+      reinterpret_cast<ulonglong2*>(params.profiler_buffer) + 1                                    \
+      + get_block_idx() * num_groups + group_idx;                                                  \
+  (closure).profiler_write_stride = get_num_blocks() * num_groups;                                  \
+  (closure).profiler_entry_tag_base = encode_tag(_sm_idx, get_block_idx(), 0, 0);                   \
+  (closure).profiler_write_thread_predicate = write_thread_predicate;
+
+
+#define PROFILER_EVENT_START_WITH_LEN(closure, event, qo_len, kv_len)                                                  \
+  if ((closure).profiler_write_thread_predicate) {                                             \
+    (closure).entry.event.tag =                                                                \
+        (closure).profiler_entry_tag_base                                                      \
+        | ((uint32_t)(event) << EVENT_IDX_SHIFT)                                               \
+        | EVENT_BEGIN;                                                                         \
+    (closure).entry.event.delta_time = get_timestamp();                                        \
+    (closure).entry.event.qo_len = static_cast<uint16_t>(qo_len);                             \
+    (closure).entry.event.kv_len = static_cast<uint16_t>(kv_len);                             \
+                                                                                                \
+    *(closure).profiler_write_ptr = (closure).entry.raw2;  /* one 128-bit store */             \
+    (closure).profiler_write_ptr += (closure).profiler_write_stride;                           \
+  }                                                                                            \
+  __threadfence_block()
+  
 #define PROFILER_EVENT_END(closure, event)                                                  \
   __threadfence_block();                                                                    \
   if (closure.profiler_write_thread_predicate) {                                            \
@@ -134,10 +198,13 @@ struct ProfilerEntry {
 #else
 
 #define PROFILER_CLOSURE_PARAMS_DECL
+#define PROFILER_CLOSURE_SEQLEN_PARAMS_DECL
 #define PROFILER_CLOSURE_FUNC_PARAMS
 #define PROFILER_FUNC_PARAMS
 #define PROFILER_PARAMS_DECL
+#define PROFILER_PARAMS_DECL_SEQLEN
 #define PROFILER_INIT(params, smem_storage, closure, group_idx, num_groups, write_thread_predicate)
+#define PROFILER_INIT_WITH_LEN(params, smem_storage, closure, group_idx, num_groups, write_thread_predicate)
 #define PROFILER_EVENT_START(closure, event)
 #define PROFILER_EVENT_END(closure, event)
 #define PROFILER_EVENT_INSTANT(closure, event)

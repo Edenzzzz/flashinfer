@@ -189,11 +189,13 @@ if __name__ == "__main__":
     parser.add_argument("--profiler-buffer-size", type=int, default=3048576)
     parser.add_argument("--use-profiler", action="store_true")
     parser.add_argument("--flipped", action="store_true")
+    parser.add_argument("--model_perf", action="store_true")
     args = parser.parse_args()
 
     # seq_len_config = [(600, 1)] * 122 + [(10000, 17)] * 8
+    decode_lens = []
     seq_len_config = [(8192, 1)] * 128 + [(4096, 4096)] * 1  # hybrid (chunked-prefill)
-
+    
     kv_lens = [p[0] for p in seq_len_config]
     qo_lens = [p[1] for p in seq_len_config]
 

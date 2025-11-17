@@ -260,16 +260,16 @@ struct BlockBatchPagedAttentionPersistent {
 #pragma unroll 1
     for (IdType work_idx = work_indptr[blockIdx.y]; work_idx < work_indptr[blockIdx.y + 1];
          ++work_idx) {
-      // profile log
-      if constexpr (CTA_TILE_Q > 64) {
-        PROFILER_EVENT_START(profiler_closure, PersistentProfileEventType::kRunner1);
-      } else {
-        PROFILER_EVENT_START(profiler_closure, PersistentProfileEventType::kRunner2);
-      }
 
       const auto [q_indptr, kv_indptr, o_indptr, q_len, kv_len, packed_qo_start, kv_start, kv_end,
                   kv_head_idx, len_kv_chunk] = get_block_coord(params, work_idx);
-
+      // profile log
+      if constexpr (CTA_TILE_Q > 64) {
+        PROFILER_EVENT_START_WITH_LEN(profiler_closure, PersistentProfileEventType::kRunner1, q_len, kv_len);
+      } else {
+        PROFILER_EVENT_START_WITH_LEN(profiler_closure, PersistentProfileEventType::kRunner2, q_len, kv_len);
+      }
+      
       const uint32_t kv_chunk_idx = kv_start / len_kv_chunk;
       const uint32_t num_kv_chunks = ceil_div(
           CAUSAL

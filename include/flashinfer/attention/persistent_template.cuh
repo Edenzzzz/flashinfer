@@ -34,7 +34,8 @@ enum class PersistentProfileEventType {
 };
 
 struct ProfilerClosure {
-  PROFILER_CLOSURE_PARAMS_DECL
+  // PROFILER_CLOSURE_PARAMS_DECL
+  PROFILER_CLOSURE_SEQLEN_PARAMS_DECL
 };
 
 // Helper metafunction to find maximum threads among multiple BlockPersistentRunners
@@ -78,7 +79,8 @@ __global__ __launch_bounds__(
 #ifdef FLASHINFER_ENABLE_PROFILER
   ProfilerClosure
       profiler_closure;  // no volatile as this is scope.CTA, and only threadIdx == 0 is modifying
-  PROFILER_INIT(params_1, smem, profiler_closure, 0, 1, (threadIdx.x == 0));
+  // PROFILER_INIT(params_1, smem, profiler_closure, 0, 1, (threadIdx.x == 0));
+  PROFILER_INIT_WITH_LEN(params_1, smem, profiler_closure, 0, 1, (threadIdx.x == 0));
 #endif
 
   auto& smem_storage_1 =
