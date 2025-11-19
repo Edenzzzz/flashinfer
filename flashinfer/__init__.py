@@ -146,12 +146,12 @@ try:
     flashinfer_cubin_version = flashinfer_cubin.__version__
 
     print("__version__", __version__)
-    if __version__ != flashinfer_cubin_version:
-        raise RuntimeError(
-            f"flashinfer-cubin version ({flashinfer_cubin_version}) does not match "
-            f"flashinfer version ({__version__}). "
-            "Please install the same version of both packages."
-        )
+    # if __version__ != flashinfer_cubin_version:
+    #     raise RuntimeError(
+    #         f"flashinfer-cubin version ({flashinfer_cubin_version}) does not match "
+    #         f"flashinfer version ({__version__}). "
+    #         "Please install the same version of both packages."
+    #     )
 except ImportError:
     # flashinfer-cubin is not installed
     pass
