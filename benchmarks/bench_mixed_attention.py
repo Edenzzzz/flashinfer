@@ -1,3 +1,4 @@
+import argparse
 import numpy as np
 import torch
 
@@ -281,43 +282,128 @@ def run_bench(
         f"Memory bandwidth (Persistent BatchAttention): {bandwidth_persistent_gb_s:.2f} GB/s"
     )
 
+    return ms_persistent / ms_batch_pod
+
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--plot-scaling",
+        action="store_true",
+        help="Plot scaling trend: use third case and scale proportionally",
+    )
+    args = parser.parse_args()
+
     np.random.seed(42)
     torch.random.manual_seed(42)
-
-    # Irregular sequence lengths for prefill and decode
-    d_q_len_configs = [[1] * 128] * 7
-    d_kv_len_configs = [
-        [2048] * 128,
-        [2048] * 128,
-        [2048] * 128,
-        [2048] * 128,
-        [4096] * 128,
-        [8192] * 128,
-        [8192] * 128,
-    ]
-    p_q_configs = [[512], [1536], [2048] * 2, [2048], [4096], [4096], [6000]]
-    p_kv_configs = [[512], [1536], [2048] * 2, [2048], [4096], [4096], [7000]]
 
     page_block_size = 1
     num_kv_heads = 8
     num_qo_heads = 32
     head_dim = 128
 
-    for idx, (p_q_lens, p_kv_lens, d_q_len, d_kv_len) in enumerate(
-        zip(p_q_configs, p_kv_configs, d_q_len_configs, d_kv_len_configs)
-    ):
-        print(f"===== Benchmark {idx + 1}: (kv_len, qo_len) set =====")
-        run_bench(
-            p_q_lens,
-            p_kv_lens,
-            d_q_len,
-            d_kv_len,
-            # page_block_size=page_block_size,
-            num_kv_heads=num_kv_heads,
-            num_qo_heads=num_qo_heads,
-            head_dim=head_dim,
-            device=0,
-            causal=True,
-        )
+    if args.plot_scaling:
+        # Use the third case (index 2) as base
+        # Base: p_q = [2048] * 2, p_kv = [2048] * 2, d_q = [1] * 100, d_kv = [2048] * 100
+        base_p_q = [2048] * 2
+        base_p_kv = [2048] * 2
+        base_d_q = [1] * 100
+        base_d_kv = [2048] * 100
+
+        scales = [0.5, 1, 2, 4, 8]
+        speedups = []
+        scale_values = []
+
+        for scale in scales:
+            if scale == 0.5:
+                # Special case for 0.5: p_q = p_kv = [2048], d_kv = [1024] * 100
+                p_q_lens = [2048]
+                p_kv_lens = [2048]
+                d_q_lens = [1] * 100
+                d_kv_lens = [1024] * 100
+            else:
+                # For 1, 2, 4, 8: p_q = p_kv = [2048 * r] * 2, d_kv = [2048 * r] * 100
+                scaled_val = int(2048 * scale)
+                p_q_lens = [scaled_val] * 2
+                p_kv_lens = [scaled_val] * 2
+                d_q_lens = [1] * 100
+                d_kv_lens = [scaled_val] * 100
+
+            print(f"===== Scaling factor: {scale} =====")
+            print(
+                f"Prefill: p_q={p_q_lens}, p_kv={p_kv_lens}, "
+                f"Decode: d_q={len(d_q_lens)} requests, d_kv={d_kv_lens[0]}"
+            )
+            speedup = run_bench(
+                p_q_lens,
+                p_kv_lens,
+                d_q_lens,
+                d_kv_lens,
+                num_kv_heads=num_kv_heads,
+                num_qo_heads=num_qo_heads,
+                head_dim=head_dim,
+                device=0,
+                causal=True,
+            )
+            speedups.append(speedup)
+            scale_values.append(scale)
+            print(f"Speedup: {speedup:.2f}x\n")
+
+        # Plot the trend
+        try:
+            import matplotlib.pyplot as plt
+
+            plt.figure(figsize=(10, 6))
+            plt.plot(scale_values, speedups, marker="o", linewidth=2, markersize=8)
+            plt.xlabel("Scaling Factor", fontsize=12)
+            plt.ylabel("Speedup over Persistent BatchAttention", fontsize=12)
+            plt.title("Batch POD Speedup Scaling Trend", fontsize=14)
+            plt.grid(True, alpha=0.3)
+            plt.xscale("log", base=2)
+            plt.xticks(scale_values, scale_values)
+            for x, y in zip(scale_values, speedups):
+                plt.annotate(
+                    f"{y:.2f}x",
+                    (x, y),
+                    textcoords="offset points",
+                    xytext=(0, 10),
+                    ha="center",
+                )
+            plt.tight_layout()
+            plt.savefig("scaling_speedup.png", dpi=150)
+            print("Plot saved to scaling_speedup.png")
+        except ImportError:
+            print("matplotlib not available, skipping plot generation")
+            print("Speedups:", dict(zip(scale_values, speedups)))
+
+    else:
+        # Irregular sequence lengths for prefill and decode
+        d_q_len_configs = [[1] * 100] * 7
+        d_kv_len_configs = [
+            [2048] * 100,
+            [2048] * 100,
+            [2048] * 100,
+            [2048] * 100,
+            [4096] * 100,
+            [8192] * 100,
+            [8192] * 100,
+        ]
+        p_q_configs = [[512], [1536], [2048] * 2, [2048], [4096], [4096], [6000]]
+        p_kv_configs = [[512], [1536], [2048] * 2, [2048], [4096], [4096], [7000]]
+
+        for idx, (p_q_lens, p_kv_lens, d_q_len, d_kv_len) in enumerate(
+            zip(p_q_configs, p_kv_configs, d_q_len_configs, d_kv_len_configs)
+        ):
+            print(f"===== Benchmark {idx + 1}: (kv_len, qo_len) set =====")
+            run_bench(
+                p_q_lens,
+                p_kv_lens,
+                d_q_len,
+                d_kv_len,
+                # page_block_size=page_block_size,
+                num_kv_heads=num_kv_heads,
+                num_qo_heads=num_qo_heads,
+                head_dim=head_dim,
+                device=0,
+                causal=True,
+            )
