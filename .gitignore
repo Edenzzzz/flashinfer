@@ -12,15 +12,14 @@ docs/generated/
 flashinfer/_build_meta.py
 flashinfer/data/
 flashinfer/jit/aot_config.py
-aot-ops/
 csrc/aot_default_additional_params.h
-*.ncu-rep
+
 # DS_Store files
 .DS_store
 
 # Microbenchmark files
 microbenchmark/
-*.perfetto-trace
+
 # vscode
 .vscode/
 

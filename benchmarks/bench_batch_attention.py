@@ -17,6 +17,138 @@ import matplotlib.pyplot as plt
 
 NUM_LAYERS = 36  # QWen3 8b
 
+save_dir = "bench_plots/persistent"
+
+
+def plot_original_comparison(df_all):
+    """Generate the original comparison plots."""
+    cases = {"1": "chunked"}
+
+    # Clean up potential duplicated header rows after appends and ensure numeric types
+    if "scheduler" in df_all.columns:
+        df_all = df_all[df_all["scheduler"] != "scheduler"]
+    df_all["seq_cfg_id"] = pd.to_numeric(df_all["seq_cfg_id"], errors="coerce")
+    df_all["bandwidth_GB_s"] = pd.to_numeric(df_all["bandwidth_GB_s"], errors="coerce")
+    df_all = df_all.dropna(
+        subset=["seq_cfg_id", "bandwidth_GB_s"]
+    )  # keep only valid rows
+    df_all["seq_cfg_id"] = df_all["seq_cfg_id"].astype(int)
+    repeats = df_all["num_repeats"].unique()
+
+    # Pick an available case (prefer 4: hybrid-chunked). Avoid empty plots when requested case is missing
+    available_cases = sorted(df_all["seq_cfg_id"].dropna().unique().tolist())
+    if not available_cases:
+        raise ValueError("No rows found in bench_batch_attention.csv")
+    preferred_case = 1 if 1 in available_cases else available_cases[0]
+    selected_case_label = cases.get(str(preferred_case), f"case {preferred_case}")
+
+    for repeat in repeats:
+        # Collect data for all cases
+        case_names = []
+        batch_prefill_values = []
+        persistent_original_values = []
+        decode_prefill_values = []
+        decode_len = df_all["decode_len"].unique()[0] // 1024
+        prefill_chunk_size = df_all["prefill_chunk_size"].unique()[0] // 1024
+        for case in [str(preferred_case)]:
+            # Compute averages for this specific repeat count
+            batch_prefill_avg = df_all[
+                (df_all["scheduler"] == "BatchPrefillWithPagedKVCacheWrapper")
+                & (df_all["seq_cfg_id"] == int(case))
+                & (df_all["num_repeats"] == repeat)
+            ]["bandwidth_GB_s"].mean()
+            decode_prefill_avg = df_all[
+                (df_all["scheduler"] == "Decode + Prefill")
+                & (df_all["seq_cfg_id"] == int(case))
+                & (df_all["num_repeats"] == repeat)
+            ]["bandwidth_GB_s"].mean()
+            persistent_original_avg = df_all[
+                (df_all["scheduler"] == "BatchAttentionWrapper")
+                & (df_all["seq_cfg_id"] == int(case))
+                & (df_all["num_repeats"] == repeat)
+            ]["bandwidth_GB_s"].mean()
+
+            case_names.append(selected_case_label)
+            # Replace NaNs with zeros to ensure bars render even if some schedulers are missing
+            batch_prefill_values.append(np.nan_to_num(batch_prefill_avg, nan=0.0))
+            decode_prefill_values.append(np.nan_to_num(decode_prefill_avg, nan=0.0))
+            persistent_original_values.append(
+                np.nan_to_num(persistent_original_avg, nan=0.0)
+            )
+
+        # Create grouped bar plot
+        x = np.arange(len(case_names))
+        width = 0.2
+        # Group persistent schedules together on the left, others on the right
+        offsets = np.array([0.5, 1.5, 2.5]) * width
+
+        plt.figure(figsize=(12, 8))  # Increased height for better spacing
+        bars1 = plt.bar(
+            x + offsets[0],
+            persistent_original_values,
+            width,
+            label="Persistent",
+            color="#2ca02c",
+        )
+        bars2 = plt.bar(
+            x + offsets[1],
+            batch_prefill_values,
+            width,
+            label="Batch Prefill",
+            color="#ff7f0e",
+        )
+        bars3 = plt.bar(
+            x + offsets[2],
+            decode_prefill_values,
+            width,
+            label="Decode + Prefill",
+            color="#9467bd",
+        )
+
+        plt.ylabel("Average Bandwidth (GB/s)")
+        plt.title(
+            f"Average Bandwidth ({selected_case_label}, {repeat} repeats, {prefill_chunk_size}k prefill, {decode_len}k decode)"
+        )
+
+        # Add more space above the highest bar for legend and value labels
+        max_value = max(
+            max(batch_prefill_values),
+            max(decode_prefill_values),
+            max(persistent_original_values),
+        )
+        plt.ylim(0, max_value * 1.08)  # 8% more space above the highest bar
+
+        plt.legend(fontsize=8, loc="upper right")
+
+        # Add value labels on bars
+        def add_value_labels(bars):
+            for bar in bars:
+                height = bar.get_height()
+                if height == 0:
+                    continue
+                # Use proportional offset based on data range
+                offset = max_value * 0.02  # 2% of max value as offset
+                plt.text(
+                    bar.get_x() + bar.get_width() / 2.0,
+                    height + offset,
+                    f"{height:.1f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                )
+
+        add_value_labels(bars1)  # Persistent (original)
+        add_value_labels(bars2)  # Batch Prefill
+        add_value_labels(bars3)  # Decode + Prefill
+
+        plt.tight_layout()
+        plt.savefig(
+            f"{save_dir}/persistent_comparison_{repeat}_repeats_{prefill_chunk_size}k_prefill_{decode_len}k_decode.png",
+            dpi=300,
+            bbox_inches="tight",
+        )
+        plt.show()
+
 
 def run_bench(
     decode_kv_lens: Sequence[int],
@@ -277,86 +409,21 @@ def synthesize_seq_len_configs(
     return decode_lens, prefill_lens
 
 
-def plot_per_model_results(df: pd.DataFrame, args: argparse.Namespace) -> None:
-    """Generate per-model comparison plots with side-by-side bars of the same color."""
-    # Get unique models and schedulers
-    models = df["model_name"].unique()
-    schedulers = df["scheduler"].unique()
-
-    # Color mapping for schedulers
-    scheduler_colors = {
-        "BatchAttentionWrapper (flipped)": "#1f77b4",
-        "BatchPrefillWithPagedKVCacheWrapper": "#ff7f0e",
-        "Decode + Prefill": "#9467bd",
-        "BatchAttentionWrapper": "#2ca02c",
-    }
-
-    # Create figure
-    fig, ax = plt.subplots(figsize=(14, 8))
-
-    # Set up bar positions
-    x = np.arange(len(models))
-    width = 0.2
-    offsets = np.array([-1.5, -0.5, 0.5, 1.5]) * width
-
-    # Plot bars for each scheduler
-    for i, scheduler in enumerate(schedulers):
-        if scheduler in scheduler_colors:
-            values = []
-            for model in models:
-                model_data = df[
-                    (df["model_name"] == model) & (df["scheduler"] == scheduler)
-                ]
-                if not model_data.empty:
-                    values.append(model_data["bandwidth_GB_s"].mean())
-                else:
-                    values.append(0)
-
-            bars = ax.bar(
-                x + offsets[i],
-                values,
-                width,
-                label=scheduler,
-                color=scheduler_colors[scheduler],
-            )
-
-            # Add value labels on bars
-            for bar, value in zip(bars, values):
-                if value > 0:
-                    ax.text(
-                        bar.get_x() + bar.get_width() / 2.0,
-                        bar.get_height() + max(values) * 0.01,
-                        f"{value:.1f}",
-                        ha="center",
-                        va="bottom",
-                        fontsize=8,
-                    )
-
-    # Customize plot
-    ax.set_xlabel("Model")
-    ax.set_ylabel("Average Bandwidth (GB/s)")
-    ax.set_title(
-        f"Per-Model Bandwidth Comparison ({args.repeats} repeats, "
-        f"{args.prefill_chunk_size // 1024}k prefill, {args.decode_len // 1024}k decode)"
-    )
-    ax.set_xticks(x)
-    ax.set_xticklabels(models, rotation=45, ha="right")
-    ax.legend(fontsize=8, loc="upper right")
-
-    # Set y-axis limits
-    max_value = df["bandwidth_GB_s"].max()
-    ax.set_ylim(0, max_value * 1.1)
-
-    plt.tight_layout()
-
-    # Save plot
-    plot_filename = f"per_model_comparison_{args.repeats}_repeats_{args.prefill_chunk_size // 1024}k_prefill_{args.decode_len // 1024}k_decode.png"
-    plt.savefig(plot_filename, dpi=300, bbox_inches="tight")
-    print(f"Per-model plot saved as: {plot_filename}")
-    plt.show()
-
-
 def main(args: argparse.Namespace) -> None:
+    # If plotting mode, load existing data and plot
+    if args.plot:
+        if not os.path.exists("bench_batch_attention.csv"):
+            print("Error: bench_batch_attention.csv not found. Run benchmark first.")
+            return
+
+        df_all = pd.read_csv("bench_batch_attention.csv")
+        os.makedirs(save_dir, exist_ok=True)
+
+        plot_original_comparison(df_all)
+
+        return
+
+    # Benchmark mode
     np.random.seed(42)
     torch.random.manual_seed(42)
     decode_len = args.decode_len
@@ -574,14 +641,9 @@ def main(args: argparse.Namespace) -> None:
     )
     print(df_print.to_markdown(index=False, floatfmt=".2f"))
 
-    # Generate per-model plots if requested
-    if args.plot_per_model:
-        plot_per_model_results(df, args)
-
 
 if __name__ == "__main__":
-    # Now running both normal and flipped schedules in a single run
-    # Each configuration will be benchmarked with both scheduling strategies
+    # Benchmark different attention schedulers and optionally plot results
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--repeats", type=int, default=100)
@@ -591,9 +653,9 @@ if __name__ == "__main__":
     parser.add_argument("--decode_len", type=int, default=8192)
     parser.add_argument("--prefill_len", type=int, default=4096)
     parser.add_argument(
-        "--plot_per_model",
+        "--plot",
         action="store_true",
-        help="Generate per-model comparison plots",
+        help="Generate comparison plots",
     )
     parser.add_argument(
         "--overwrite", action="store_true", help="Overwrite existing CSV file"

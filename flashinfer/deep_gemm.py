@@ -41,7 +41,7 @@ except ImportError as e:
 
 import torch
 
-from .artifacts import ArtifactPath, MetaInfoHash
+from .artifacts import ArtifactPath
 from .cuda_utils import checkCudaErrors
 from .jit.cubin_loader import get_cubin
 from .jit.env import FLASHINFER_CUBIN_DIR
@@ -934,8 +934,9 @@ def load_all():
         if cubin_name in RUNTIME_CACHE:
             continue
         symbol, sha256 = KERNEL_MAP[cubin_name]
-        get_cubin(ArtifactPath.DEEPGEMM + cubin_name, sha256)
-        path = FLASHINFER_CUBIN_DIR / f"{ArtifactPath.DEEPGEMM + cubin_name}.cubin"
+        cubin_name = cubin_name + ".cubin"
+        get_cubin(ArtifactPath.DEEPGEMM + "/" + cubin_name, sha256)
+        path = FLASHINFER_CUBIN_DIR / ArtifactPath.DEEPGEMM / cubin_name
         assert path.exists()
         RUNTIME_CACHE[cubin_name] = SM100FP8GemmRuntime(str(path), symbol)
 
@@ -948,8 +949,9 @@ def load(name: str, code: str) -> SM100FP8GemmRuntime:
     if cubin_name in RUNTIME_CACHE:
         return RUNTIME_CACHE[cubin_name]
     symbol, sha256 = KERNEL_MAP[cubin_name]
-    get_cubin(ArtifactPath.DEEPGEMM + cubin_name, sha256)
-    path = FLASHINFER_CUBIN_DIR / f"{ArtifactPath.DEEPGEMM + cubin_name}.cubin"
+    cubin_name = cubin_name + ".cubin"
+    get_cubin(ArtifactPath.DEEPGEMM + "/" + cubin_name, sha256)
+    path = FLASHINFER_CUBIN_DIR / ArtifactPath.DEEPGEMM / cubin_name
     assert path.exists()
     RUNTIME_CACHE[cubin_name] = SM100FP8GemmRuntime(str(path), symbol)
     return RUNTIME_CACHE[cubin_name]
@@ -1485,16 +1487,18 @@ def m_grouped_fp8_gemm_nt_masked(
 
 
 class KernelMap:
-    def __init__(self, sha256: str):
-        self.sha256 = sha256
+    # Hash for kernel_map.json, updated when deepgemm cubins are republished
+    KERNEL_MAP_HASH = "f161e031826adb8c4f0d31ddbd2ed77e4909e4e43cdfc9728918162a62fcccfb"
+
+    def __init__(self):
         self.indice = None
 
     def init_indices(self):
-        indice_path = ArtifactPath.DEEPGEMM + "kernel_map"
-        assert get_cubin(indice_path, self.sha256, file_extension=".json"), (
+        indice_path = ArtifactPath.DEEPGEMM + "/" + "kernel_map.json"
+        assert get_cubin(indice_path, self.KERNEL_MAP_HASH), (
             "cubin kernel map file not found, nor downloaded with matched sha256"
         )
-        path = FLASHINFER_CUBIN_DIR / f"{indice_path}.json"
+        path = FLASHINFER_CUBIN_DIR / indice_path
         assert path.exists()
         with open(path, "r") as f:
             self.indice = json.load(f)
@@ -1511,4 +1515,4 @@ class KernelMap:
         return self.indice[key]
 
 
-KERNEL_MAP = KernelMap(MetaInfoHash.DEEPGEMM)
+KERNEL_MAP = KernelMap()

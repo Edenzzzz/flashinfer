@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 # flashinfer-cli
+import os
 import click
 from tabulate import tabulate  # type: ignore[import-untyped]
 
@@ -29,6 +30,9 @@ from .jit.cubin_loader import FLASHINFER_CUBINS_REPOSITORY
 from .jit.env import FLASHINFER_CACHE_DIR, FLASHINFER_CUBIN_DIR
 from .jit.core import current_compilation_context
 from .jit.cpp_ext import get_cuda_path, get_cuda_version
+
+# Import __version__ from centralized version module
+from .version import __version__
 
 
 def _download_cubin():
@@ -73,22 +77,60 @@ def cli(ctx, download_cubin_flag):
 env_variables = {
     "FLASHINFER_CACHE_DIR": FLASHINFER_CACHE_DIR,
     "FLASHINFER_CUBIN_DIR": FLASHINFER_CUBIN_DIR,
-    "CUDA_HOME": get_cuda_path(),
-    "CUDA_VERSION": get_cuda_version(),
     "FLASHINFER_CUDA_ARCH_LIST": current_compilation_context.TARGET_CUDA_ARCHS,
+    "FLASHINFER_CUDA_VERSION": get_cuda_version(),
     "FLASHINFER_CUBINS_REPOSITORY": FLASHINFER_CUBINS_REPOSITORY,
+    "CUDA_VERSION": get_cuda_version(),
 }
+try:
+    env_variables["CUDA_HOME"] = get_cuda_path()
+    found_nvcc = os.path.isfile(os.path.join(env_variables["CUDA_HOME"], "bin", "nvcc"))
+except Exception:
+    env_variables["CUDA_HOME"] = ""
+    found_nvcc = False
 
 
 @cli.command("show-config")
 def show_config_cmd():
     """Show configuration"""
-    import torch
+
+    click.secho("=== Version Info ===", fg="yellow")
+    click.secho("FlashInfer version:", fg="magenta", nl=False)
+    click.secho(f" {__version__}", fg="cyan")
+
+    # Check for additional packages
+    try:
+        import importlib.metadata
+
+        try:
+            cubin_version = importlib.metadata.version("flashinfer-cubin")
+            click.secho("flashinfer-cubin version:", fg="magenta", nl=False)
+            click.secho(f" {cubin_version}", fg="cyan")
+        except importlib.metadata.PackageNotFoundError:
+            click.secho("flashinfer-cubin:", fg="magenta", nl=False)
+            click.secho(" Not installed", fg="red")
+
+        try:
+            jit_cache_version = importlib.metadata.version("flashinfer-jit-cache")
+            click.secho("flashinfer-jit-cache version:", fg="magenta", nl=False)
+            click.secho(f" {jit_cache_version}", fg="cyan")
+        except importlib.metadata.PackageNotFoundError:
+            click.secho("flashinfer-jit-cache:", fg="magenta", nl=False)
+            click.secho(" Not installed", fg="red")
+    except Exception as e:
+        click.secho(f"Error checking package versions: {e}", fg="yellow")
 
     # Section: Torch Version Info
+    import torch
+
     click.secho("=== Torch Version Info ===", fg="yellow")
     click.secho("Torch version:", fg="magenta", nl=False)
     click.secho(f" {torch.__version__}", fg="cyan")
+    click.secho("CUDA runtime available:", fg="magenta", nl=False)
+    if torch.cuda.is_available():
+        click.secho(" Yes", fg="green")
+    else:
+        click.secho(" No", fg="red")
     click.secho("", fg="white")
 
     # Section: Environment Variables
@@ -96,6 +138,11 @@ def show_config_cmd():
     for name, value in env_variables.items():
         click.secho(f"{name}:", fg="magenta", nl=False)
         click.secho(f" {value}", fg="cyan")
+    click.secho("NVCC found:", fg="magenta", nl=False)
+    if found_nvcc:
+        click.secho(" Yes", fg="green")
+    else:
+        click.secho(" No", fg="red")
     click.secho("", fg="white")
 
     # Section: Artifact path
@@ -111,7 +158,7 @@ def show_config_cmd():
     click.secho("=== Downloaded Cubins ===", fg="yellow")
 
     status = get_artifacts_status()
-    num_downloaded = sum(1 for _, _, exists in status if exists)
+    num_downloaded = sum(1 for _, exists in status if exists)
     total_cubins = len(status)
 
     click.secho(f"Downloaded {num_downloaded}/{total_cubins} cubins", fg="cyan")
@@ -124,8 +171,7 @@ def show_config_cmd():
     if module_statuses:
         stats = jit_spec_registry.get_stats()
         click.secho(f"Total modules: {stats['total']}", fg="cyan")
-        click.secho(f"AOT compiled: {stats['aot_compiled']}", fg="green")
-        click.secho(f"JIT compiled: {stats['jit_compiled']}", fg="magenta")
+        click.secho(f"compiled: {stats['compiled']}", fg="magenta")
         click.secho(f"Not compiled: {stats['not_compiled']}", fg="red")
 
 
@@ -134,10 +180,11 @@ def list_cubins_cmd():
     """List downloaded cubins"""
     status = get_artifacts_status()
     table_data = []
-    for name, extension, exists in status:
+
+    for file_name, exists in status:
         status_str = "Downloaded" if exists else "Missing"
         color = "green" if exists else "red"
-        table_data.append([f"{name}{extension}", click.style(status_str, fg=color)])
+        table_data.append([file_name, click.style(status_str, fg=color)])
 
     click.echo(tabulate(table_data, headers=["Cubin", "Status"], tablefmt="github"))
     click.secho("", fg="white")
@@ -185,8 +232,6 @@ def module_status_cmd(detailed, filter):
 
     # Apply filter
     filter_map = {
-        "aot": lambda s: s.is_aot,
-        "jit": lambda s: not s.is_aot,
         "compiled": lambda s: s.is_compiled,
         "not-compiled": lambda s: not s.is_compiled,
     }
@@ -200,7 +245,6 @@ def module_status_cmd(detailed, filter):
         # Detailed view
         for status in statuses:
             click.secho(f"Module: {status.name}", fg="cyan", bold=True)
-            click.secho(f"  Type: {status.compilation_type}", fg="white")
             click.secho(
                 f"  Status: {click.style(status.status, fg='green' if status.is_compiled else 'red')}"
             )
@@ -219,11 +263,9 @@ def module_status_cmd(detailed, filter):
         table_data = []
         for status in statuses:
             status_color = "green" if status.is_compiled else "red"
-            type_color = "blue" if status.is_aot else "magenta"
             table_data.append(
                 [
                     status.name,
-                    click.style(status.compilation_type, fg=type_color),
                     click.style(status.status, fg=status_color),
                     len(status.sources),
                     "Yes" if status.needs_device_linking else "No",
@@ -238,8 +280,7 @@ def module_status_cmd(detailed, filter):
     click.echo()
     click.secho("=== Summary ===", fg="yellow")
     click.secho(f"Total modules: {stats['total']}", fg="cyan")
-    click.secho(f"AOT compiled: {stats['aot_compiled']}", fg="blue")
-    click.secho(f"JIT compiled: {stats['jit_compiled']}", fg="magenta")
+    click.secho(f"Compiled: {stats['compiled']}", fg="magenta")
     click.secho(f"Not compiled: {stats['not_compiled']}", fg="red")
 
 
@@ -260,7 +301,6 @@ def list_modules_cmd(module_name):
             return
 
         click.secho(f"Module: {status.name}", fg="cyan", bold=True)
-        click.secho(f"Type: {status.compilation_type}", fg="white")
         click.secho(
             f"Status: {click.style(status.status, fg='green' if status.is_compiled else 'red')}"
         )
@@ -286,9 +326,8 @@ def list_modules_cmd(module_name):
         click.secho("Available compilation modules:", fg="cyan", bold=True)
         for status in statuses:
             status_color = "green" if status.is_compiled else "red"
-            type_indicator = "[AOT]" if status.is_aot else "[JIT]"
             click.secho(
-                f"  {status.name} {type_indicator} - {click.style(status.status, fg=status_color)}"
+                f"  {status.name} - {click.style(status.status, fg=status_color)}"
             )
 
 

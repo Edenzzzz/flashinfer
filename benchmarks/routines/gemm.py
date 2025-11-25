@@ -419,6 +419,7 @@ def testGroupGemmFp8NtGroupwise(args):
     else:
         a_scale_shape = (k // tile_size, m * group_size)
         b_scale_shape = (group_size, k // tile_size, n // tile_size)
+
     a_tile_shape = (1, tile_size)
     b_tile_shape = (1, tile_size, tile_size)
 

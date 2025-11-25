@@ -14,5 +14,30 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from .tvm import gen_grouped_gemm_fp8_tvm_binding as gen_grouped_gemm_fp8_tvm_binding
-from .tvm import get_grouped_gemm_fp8_uri as get_grouped_gemm_fp8_uri
+from .core import (
+    gen_gemm_module,
+    gen_gemm_sm100_module_cutlass_fp4,
+    gen_gemm_sm120_module_cutlass_fp4,
+    gen_gemm_sm100_module_cutlass_fp8,
+    gen_gemm_sm100_module,
+    gen_gemm_sm120_module,
+    gen_trtllm_gen_gemm_module,
+    gen_trtllm_low_latency_gemm_module,
+    gen_tgv_gemm_sm10x_module,
+    gen_gemm_sm90_module,
+)
+from .deepgemm import gen_deepgemm_sm100_module
+
+__all__ = [
+    "gen_gemm_module",
+    "gen_gemm_sm100_module_cutlass_fp4",
+    "gen_gemm_sm120_module_cutlass_fp4",
+    "gen_gemm_sm100_module_cutlass_fp8",
+    "gen_gemm_sm100_module",
+    "gen_gemm_sm120_module",
+    "gen_trtllm_gen_gemm_module",
+    "gen_trtllm_low_latency_gemm_module",
+    "gen_tgv_gemm_sm10x_module",
+    "gen_gemm_sm90_module",
+    "gen_deepgemm_sm100_module",
+]

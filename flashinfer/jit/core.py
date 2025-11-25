@@ -1,21 +1,40 @@
 import dataclasses
+import functools
 import logging
 import os
 from contextlib import nullcontext
-from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Union
 from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Union, Hashable
 
-import torch
+import tvm_ffi
 from filelock import FileLock
 
+from ..compilation_context import CompilationContext
 from . import env as jit_env
 from .cpp_ext import generate_ninja_build_for_op, run_ninja
 from .utils import write_if_different
-from ..compilation_context import CompilationContext
 
 os.makedirs(jit_env.FLASHINFER_WORKSPACE_DIR, exist_ok=True)
 os.makedirs(jit_env.FLASHINFER_CSRC_DIR, exist_ok=True)
+
+
+class MissingJITCacheError(RuntimeError):
+    """
+    Exception raised when JIT compilation is disabled and the JIT cache
+    does not contain the required precompiled module.
+
+    This error indicates that a module needs to be added to the JIT cache
+    build configuration.
+
+    Attributes:
+        spec: JitSpec of the missing module
+        message: Error message
+    """
+
+    def __init__(self, message: str, spec: Optional["JitSpec"] = None):
+        self.spec = spec
+        super().__init__(message)
 
 
 class FlashInferJITLogger(logging.Logger):
@@ -41,6 +60,33 @@ class FlashInferJITLogger(logging.Logger):
                 "%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - flashinfer.jit: %(message)s"
             )
         )
+
+    def debug_once(self, msg: str, *args: Hashable) -> None:
+        """
+        As [`debug`][logging.Logger.debug], but subsequent calls with
+        the same message are silently dropped.
+        """
+        self._print_once(self.debug, msg, *args)
+
+    def info_once(self, msg: str, *args: Hashable) -> None:
+        """
+        As [`info`][logging.Logger.info], but subsequent calls with
+        the same message are silently dropped.
+        """
+        self._print_once(self.info, msg, *args)
+
+    def warning_once(self, msg: str, *args: Hashable) -> None:
+        """
+        As [`warning`][logging.Logger.warning], but subsequent calls with
+        the same message are silently dropped.
+        """
+        self._print_once(self.warning, msg, *args)
+
+    @functools.lru_cache(maxsize=None)
+    def _print_once(self, log_method, msg: str, *args: Hashable) -> None:
+        """Helper method to log messages only once per unique (msg, args) combination."""
+        # Note: stacklevel=3 to show the caller's location, not this helper method
+        log_method(msg, *args, stacklevel=3)
 
 
 logger = FlashInferJITLogger("flashinfer.jit")
@@ -72,9 +118,14 @@ common_nvcc_flags = [
     "-DFLASHINFER_ENABLE_FP8_E8M0",
     "-DFLASHINFER_ENABLE_FP4_E2M1",
 ]
+sm89_nvcc_flags = [
+    "-gencode=arch=compute_89,code=sm_89",
+    "-DFLASHINFER_ENABLE_FP8_E8M0",
+]
 sm90a_nvcc_flags = ["-gencode=arch=compute_90a,code=sm_90a"] + common_nvcc_flags
 sm100a_nvcc_flags = ["-gencode=arch=compute_100a,code=sm_100a"] + common_nvcc_flags
 sm103a_nvcc_flags = ["-gencode=arch=compute_103a,code=sm_103a"] + common_nvcc_flags
+sm100f_nvcc_flags = ["-gencode=arch=compute_100f,code=sm_100f"] + common_nvcc_flags
 sm110a_nvcc_flags = ["-gencode=arch=compute_110a,code=sm_110a"] + common_nvcc_flags
 sm120a_nvcc_flags = ["-gencode=arch=compute_120a,code=sm_120a"] + common_nvcc_flags
 sm121a_nvcc_flags = ["-gencode=arch=compute_121a,code=sm_121a"] + common_nvcc_flags
@@ -88,15 +139,10 @@ class JitSpecStatus:
 
     name: str
     created_at: datetime
-    is_aot: bool
     is_compiled: bool
     library_path: Optional[Path]
     sources: List[Path]
     needs_device_linking: bool
-
-    @property
-    def compilation_type(self) -> str:
-        return "AOT" if self.is_aot else "JIT"
 
     @property
     def status(self) -> str:
@@ -129,17 +175,12 @@ class JitSpecRegistry:
             return None
 
         spec = self._specs[name]
-        library_path = (
-            spec.get_library_path()
-            if (spec.is_aot or spec.jit_library_path.exists())
-            else None
-        )
+        library_path = spec.get_library_path() if spec.is_compiled else None
 
         return JitSpecStatus(
             name=spec.name,
             created_at=self._creation_times[name],
-            is_aot=spec.is_aot,
-            is_compiled=spec.is_aot or spec.jit_library_path.exists(),
+            is_compiled=spec.is_compiled,
             library_path=library_path,
             sources=spec.sources,
             needs_device_linking=spec.needs_device_linking,
@@ -159,8 +200,7 @@ class JitSpecRegistry:
         statuses = self.get_all_statuses()
         return {
             "total": len(statuses),
-            "aot_compiled": sum(1 for s in statuses if s.is_aot),
-            "jit_compiled": sum(1 for s in statuses if not s.is_aot and s.is_compiled),
+            "compiled": sum(1 for s in statuses if s.is_compiled),
             "not_compiled": sum(1 for s in statuses if not s.is_compiled),
         }
 
@@ -193,6 +233,16 @@ class JitSpec:
             return self.aot_path
         return self.jit_library_path
 
+    def get_object_paths(self) -> List[Path]:
+        object_paths = []
+        jit_dir = self.jit_library_path.parent
+        for source in self.sources:
+            is_cuda = source.suffix == ".cu"
+            object_suffix = ".cuda.o" if is_cuda else ".o"
+            obj_name = source.with_suffix(object_suffix).name
+            object_paths.append(jit_dir / obj_name)
+        return object_paths
+
     @property
     def aot_path(self) -> Path:
         return jit_env.FLASHINFER_AOT_DIR / self.name / f"{self.name}.so"
@@ -200,6 +250,10 @@ class JitSpec:
     @property
     def is_aot(self) -> bool:
         return self.aot_path.exists()
+
+    @property
+    def is_compiled(self) -> bool:
+        return self.get_library_path().exists()
 
     @property
     def lock_path(self) -> Path:
@@ -219,25 +273,33 @@ class JitSpec:
         )
         write_if_different(ninja_path, content)
 
+    @property
+    def is_ninja_generated(self) -> bool:
+        return self.ninja_path.exists()
+
     def build(self, verbose: bool, need_lock: bool = True) -> None:
+        if os.environ.get("FLASHINFER_DISABLE_JIT"):
+            raise MissingJITCacheError(
+                "JIT compilation is disabled via FLASHINFER_DISABLE_JIT environment variable, "
+                "but the required module is not found in the JIT cache. "
+                "Please add the missing module to the JIT cache build configuration.",
+                spec=self,
+            )
         lock = (
             FileLock(self.lock_path, thread_local=False) if need_lock else nullcontext()
         )
         with lock:
+            # Write ninja file if it doesn't exist (deferred case)
+            if not self.is_ninja_generated:
+                self.write_ninja()
             run_ninja(jit_env.FLASHINFER_JIT_DIR, self.ninja_path, verbose)
 
-    def load(self, so_path: Path, class_name: str = None):
-        load_class = class_name is not None
-        loader = torch.classes if load_class else torch.ops
-        loader.load_library(so_path)
-        if load_class:
-            cls = torch._C._get_custom_class_python_wrapper(self.name, class_name)
-            return cls
-        return getattr(loader, self.name)
+    def load(self, so_path: Path):
+        return tvm_ffi.load_module(str(so_path))
 
-    def build_and_load(self, class_name: str = None):
+    def build_and_load(self):
         if self.is_aot:
-            return self.load(self.aot_path, class_name)
+            return self.load(self.aot_path)
 
         # Guard both build and load with the same lock to avoid race condition
         # where another process is building the library and removes the .so file.
@@ -245,7 +307,7 @@ class JitSpec:
             so_path = self.jit_library_path
             verbose = os.environ.get("FLASHINFER_JIT_VERBOSE", "0") == "1"
             self.build(verbose, need_lock=False)
-            result = self.load(so_path, class_name)
+            result = self.load(so_path)
 
         return result
 
@@ -260,7 +322,10 @@ def gen_jit_spec(
     needs_device_linking: bool = False,
 ) -> JitSpec:
     check_cuda_arch()
-    verbose = os.environ.get("FLASHINFER_JIT_VERBOSE", "0") == "1"
+    # Use FLASHINFER_JIT_DEBUG if set, otherwise use FLASHINFER_JIT_VERBOSE (for backward compatibility)
+    debug_env = os.environ.get("FLASHINFER_JIT_DEBUG")
+    verbose_env = os.environ.get("FLASHINFER_JIT_VERBOSE", "0")
+    debug = (debug_env if debug_env is not None else verbose_env) == "1"
 
     cflags = ["-std=c++17", "-Wno-switch-bool"]
     cuda_cflags = [
@@ -272,7 +337,7 @@ def gen_jit_spec(
         "-DFLASHINFER_ENABLE_FP8_E4M3",
         "-DFLASHINFER_ENABLE_FP8_E5M2",
     ]
-    if verbose:
+    if debug:
         cflags += ["-O0", "-g"]
         cuda_cflags += [
             "-g",
@@ -280,7 +345,6 @@ def gen_jit_spec(
             "-G",
             "-lineinfo",
             "--ptxas-options=-v",
-            "--ptxas-options=--verbose,--register-usage-level=10,--warn-on-local-memory-usage",
             "-DCUTLASS_DEBUG_TRACE_LEVEL=2",
         ]
     else:
@@ -289,11 +353,7 @@ def gen_jit_spec(
         cflags += ["-O3"]
 
     # useful for ncu
-    if bool(os.environ.get("FLASHINFER_JIT_LINEINFO", "0")):
-        cuda_cflags += ["-lineinfo"]
-
-    # useful for ncu
-    if bool(os.environ.get("FLASHINFER_JIT_LINEINFO", "0")):
+    if os.environ.get("FLASHINFER_JIT_LINEINFO", "0") == "1":
         cuda_cflags += ["-lineinfo"]
 
     if extra_cflags is not None:
@@ -314,7 +374,6 @@ def gen_jit_spec(
         ),
         needs_device_linking=needs_device_linking,
     )
-    spec.write_ninja()
 
     # Register the spec in the global registry
     jit_spec_registry.register(spec)
@@ -340,6 +399,9 @@ def build_jit_specs(
         if skip_prebuilt and spec.aot_path.exists():
             continue
         lines.append(f"subninja {spec.ninja_path}")
+        if not spec.is_ninja_generated:
+            with FileLock(spec.lock_path, thread_local=False):
+                spec.write_ninja()
     if not lines:
         return
 

@@ -204,6 +204,12 @@ def get_trtllm_gen_prefill_module():
         sm_count = get_device_sm_count(query.device)
         if out is None:
             out = torch.empty_like(query)
+        bmm1_scale = (
+            bmm1_scale.item() if isinstance(bmm1_scale, torch.Tensor) else bmm1_scale
+        )
+        bmm2_scale = (
+            bmm2_scale.item() if isinstance(bmm2_scale, torch.Tensor) else bmm2_scale
+        )
         op.trtllm_paged_attention_context(
             out,
             None,  # fp4 output not supported in wrapper api yet.
@@ -252,7 +258,7 @@ def get_trtllm_gen_prefill_module():
 def get_single_prefill_module(backend, *args):
     uri = get_single_prefill_uri(backend, *args)
     module = gen_single_prefill_module(backend, *args).build_and_load()
-    run_func = module.run.default
+    run_func = module.run
 
     # torch library for single_prefill_with_kv_cache
 
@@ -366,9 +372,9 @@ def get_batch_prefill_module(backend, *args):
     else:
         uri = get_batch_prefill_uri(backend, *args)
         module = gen_batch_prefill_module(backend, *args).build_and_load()
-        plan_func = module.plan.default
-        ragged_run_func = module.ragged_run.default
-        paged_run_func = module.paged_run.default
+        plan_func = module.plan
+        ragged_run_func = module.ragged_run
+        paged_run_func = module.paged_run
 
     # torch library for ragged_run
 
@@ -720,9 +726,9 @@ def get_batch_prefill_module(backend, *args):
 
 @functools.cache
 def get_batch_prefill_jit_module(module_name: str, jit_module: Any):
-    plan_func = jit_module.plan.default
-    ragged_run_func = jit_module.ragged_run.default
-    paged_run_func = jit_module.paged_run.default
+    plan_func = jit_module.plan
+    ragged_run_func = jit_module.ragged_run
+    paged_run_func = jit_module.paged_run
 
     # torch library for ragged_run
     @register_custom_op(
@@ -886,7 +892,7 @@ def single_prefill_with_kv_cache_with_jit_module(
     lse = None
     if return_lse:
         lse = torch.empty((q.size(0), q.size(1)), dtype=torch.float32, device=device)
-    jit_module.run.default(
+    jit_module.run(
         q,
         k,
         v,
@@ -1478,7 +1484,7 @@ class BatchPrefillWithPagedKVCacheWrapper:
         self._paged_kv_last_page_len_buf = paged_kv_last_page_len_buf
         self._custom_mask_buf = custom_mask_buf
         self._mask_indptr_buf = mask_indptr_buf
-        self._max_total_num_rows = None
+        self._max_total_num_rows: Optional[int] = None
         self._backend = backend
         self._plan_info = None
         self._cached_module = None
@@ -1709,8 +1715,8 @@ class BatchPrefillWithPagedKVCacheWrapper:
             self._max_q_len = max_token_per_sequence
         else:
             qo_indptr_host = qo_indptr.to("cpu")
-            self._max_q_len = max(qo_indptr_host).item()
-            total_num_rows = qo_indptr_host[-1]
+            self._max_q_len = max(qo_indptr_host[1:] - qo_indptr_host[:-1]).item()
+            total_num_rows = int(qo_indptr_host[-1])
 
         if max_sequence_kv is not None:
             self._max_kv_len = max_sequence_kv
@@ -1851,7 +1857,6 @@ class BatchPrefillWithPagedKVCacheWrapper:
 
         self._block_tables = block_tables
         if self._backend == "trtllm-gen":
-            assert self._kv_layout == "HND"
             assert logits_soft_cap == 0.0
             if self._block_tables is None:
                 blocks_per_seq = [
@@ -1897,6 +1902,7 @@ class BatchPrefillWithPagedKVCacheWrapper:
             if self._backend == "fa2":
                 args.append(fixed_split_size or -1)  # fixed_split_size
                 args.append(disable_split_kv)  # disable_split_kv
+                args.append(0)  # num_colocated_ctas
             self._plan_info = self._cached_module.plan(
                 *args,
             )
@@ -2035,6 +2041,7 @@ class BatchPrefillWithPagedKVCacheWrapper:
         _check_cached_qkv_data_type(
             q, k_cache, self._cached_q_data_type, self._cached_kv_data_type
         )
+
         stride_block = k_cache.stride(0)
         if self._kv_layout == "NHD":
             page_size = k_cache.shape[1]
@@ -2081,6 +2088,12 @@ class BatchPrefillWithPagedKVCacheWrapper:
             check_shape_dtype_device(
                 out, q.shape[:-1] + v_cache.shape[-1:], q.dtype, q.device, "out"
             )
+
+        # Convert NHD layout to HND for trtllm-gen backend
+        if self._backend == "trtllm-gen" and self._kv_layout == "NHD":
+            # For NHD: [..., N, H, D] -> HND: [..., H, N, D]
+            k_cache = k_cache.transpose(-3, -2)
+            v_cache = v_cache.transpose(-3, -2)
 
         if self._custom_mask_buf is not None:
             mask_mode = MaskMode.CUSTOM.value
@@ -2448,7 +2461,7 @@ class BatchPrefillWithRaggedKVCacheWrapper:
         self._kv_indptr_buf = kv_indptr_buf
         self._custom_mask_buf = custom_mask_buf
         self._mask_indptr_buf = mask_indptr_buf
-        self._max_total_num_rows = None
+        self._max_total_num_rows: Optional[int] = None
         self._backend = backend
         self._cached_module = None
 
@@ -2640,7 +2653,7 @@ class BatchPrefillWithRaggedKVCacheWrapper:
         qo_indptr_host = qo_indptr.to("cpu")
         kv_indptr_host = kv_indptr.to("cpu")
 
-        total_num_rows = qo_indptr_host[-1]
+        total_num_rows = int(qo_indptr_host[-1])
 
         if self.is_cuda_graph_enabled:
             if self._max_total_num_rows is None:
@@ -2757,6 +2770,7 @@ class BatchPrefillWithRaggedKVCacheWrapper:
             if self._backend == "fa2":
                 args.append(fixed_split_size or -1)  # fixed_split_size
                 args.append(disable_split_kv)  # disable_split_kv
+                args.append(0)  # num_colocated_ctas
             self._plan_info = self._cached_module.plan(
                 *args,
             )
@@ -3323,6 +3337,7 @@ def trtllm_batch_context_with_kv_cache(
     out_dtype: Optional[Union[torch.dtype, str]] = None,
     o_sf_scale: Optional[float] = None,
     o_sf_vec_size: Optional[int] = None,
+    kv_layout: str = "HND",
     enable_pdl: Optional[bool] = None,
     sinks: Optional[List[torch.Tensor]] = None,
 ) -> Union[torch.Tensor, FP4Tensor]:
@@ -3332,8 +3347,11 @@ def trtllm_batch_context_with_kv_cache(
     query : torch.Tensor
         query tensor with shape [num_tokens, num_heads, head_dim]
     kv_cache : Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]
-        If kv_cache is a single tensor, it should be a tensor with shape [num_pages, 1 or 2, num_kv_heads, page_size, head_dim]
-        If kv_cache is a tuple of two tensors, it should be a tuple of two tensors with shape [num_pages, num_kv_heads, page_size, head_dim]
+        If kv_cache is a single tensor, it should be a tensor with shape [num_pages, 1 or 2, num_kv_heads, page_size, head_dim] if :attr:`kv_layout` is "HND",
+        or [num_pages, 1 or 2, page_size, num_kv_heads, head_dim] if :attr:`kv_layout` is "NHD".
+        If kv_cache is a tuple of two tensors, it should be a tuple of two tensors with shape [num_pages, num_kv_heads, page_size, head_dim] if :attr:`kv_layout` is "HND",
+        or [num_pages, page_size, num_kv_heads, head_dim] if :attr:`kv_layout` is "NHD".
+        The first tensor is the key cache, the second tensor is the value cache.
     workspace_buffer : torch.Tensor. Must be initialized to 0 for its first use.
         workspace
     block_tables : torch.Tensor
@@ -3365,6 +3383,11 @@ def trtllm_batch_context_with_kv_cache(
         scale for nvfp4 output tensor scale factor.
     o_sf_vec_size : Optional[int] = None
         vector size for nvfp4 output tensor scale factor.
+    enable_pdl : Optional[bool] = None
+        Whether to enable Programmatic Dependent Launch (PDL). See https://docs.nvidia.com/cuda/cuda-c-programming-guide/#programmatic-dependent-launch-and-synchronization
+        Defaults to ``None``, which means it will be enabled if the device supports PDL.
+    kv_layout : str = "HND"
+        Layout of kv-cache, can be "HND" or "NHD", default is "HND".
     sinks : Optional[List[torch.Tensor]] = None
         additional value per head in the denominator of the softmax.
 
@@ -3389,6 +3412,12 @@ def trtllm_batch_context_with_kv_cache(
             # NOTE(Zihao): unbind transforms [num_pages, 2, ...] to ([num_pages, ...], [num_pages, ...])
             # it doesn't change underlying storage
             k_cache, v_cache = kv_cache.unbind(dim=1)
+
+    # Convert NHD layout to HND if necessary (transpose only changes stride, not data)
+    if kv_layout == "NHD":
+        # For NHD: [..., N, H, D] -> HND: [..., H, N, D]
+        k_cache = k_cache.transpose(-3, -2)
+        v_cache = v_cache.transpose(-3, -2)
 
     run_func = get_trtllm_gen_fmha_module().trtllm_paged_attention_context
     sm_count = get_device_sm_count(query.device)
@@ -3464,6 +3493,13 @@ def trtllm_batch_context_with_kv_cache(
         check_shape_dtype_device(out, query.shape, out_dtype, query.device, "out")
     else:
         raise ValueError(f"Invalid out_dtype: {out_dtype}")
+
+    bmm1_scale = (
+        bmm1_scale.item() if isinstance(bmm1_scale, torch.Tensor) else bmm1_scale
+    )
+    bmm2_scale = (
+        bmm2_scale.item() if isinstance(bmm2_scale, torch.Tensor) else bmm2_scale
+    )
 
     workspace_size = workspace_buffer.numel() * workspace_buffer.element_size()
     run_func(
