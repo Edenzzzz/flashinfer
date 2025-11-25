@@ -978,6 +978,7 @@ class BatchPODWithPagedKVCacheWrapper:
         v_scale: Optional[float] = None,
         use_fp16_qk_reduction: bool = False,
         enable_pdl: Optional[bool] = None,
+        join_outputs: bool = True,
         *args,
     ) -> Union[
         Tuple[torch.Tensor, torch.Tensor],
@@ -1031,12 +1032,22 @@ class BatchPODWithPagedKVCacheWrapper:
             else:
                 mask_mode_p = MaskMode.NON_CAUSAL.value
 
+        lse_d = None
         lse_p = None
-        if return_lse:
-            lse_p = torch.empty(
-                (q_p.size(0), q_p.size(1)), dtype=torch.float32, device=q_p.device
-            )
-        out_p = torch.empty_like(q_p)
+        if join_outputs:
+            out = torch.empty(q_d.shape[0] + q_p.shape[0], q_p.shape[1], q_p.shape[2], device=q_p.device, dtype=q_p.dtype)
+            out_d = out[:q_d.shape[0]]
+            out_p = out[q_d.shape[0]:]
+            if return_lse:
+                lse = torch.empty(q_d.shape[0] + q_p.shape[0], q_p.shape[1], device=q_p.device, dtype=torch.float32)
+                lse_d = lse[:q_d.shape[0]]
+                lse_p = lse[q_d.shape[0]:]
+        else:
+            out_p = torch.empty_like(q_p)
+            out_d = torch.empty_like(q_d)
+            if return_lse:
+                lse_d = torch.empty_like(q_d)
+                lse_p = torch.empty_like(q_p)
 
         # Decode setup
         k_cache_d, v_cache_d = _unpack_paged_kv_cache(paged_kv_cache_d, self._kv_layout)
@@ -1065,12 +1076,11 @@ class BatchPODWithPagedKVCacheWrapper:
         if rope_theta_d is None:
             rope_theta_d = 1e4
 
-        lse_d = None
-        if return_lse:
-            lse_d = torch.empty(
-                (q_d.size(0), q_d.size(1)), dtype=torch.float32, device=q_d.device
-            )
-        out_d = torch.empty_like(q_d)
+        # lse_d = None
+        # if return_lse:
+        #     lse_d = torch.empty(
+        #         (q_d.size(0), q_d.size(1)), dtype=torch.float32, device=q_d.device
+        #     )            
 
         module_getter = get_batch_pod_module(
             # Prefill params
@@ -1140,8 +1150,10 @@ class BatchPODWithPagedKVCacheWrapper:
 
         if v_scale is not None:
             out_d *= v_scale
-
-        return ((out_p, out_d), (lse_p, lse_d)) if return_lse else (out_p, out_d)
+        if join_outputs:
+            return (out, lse) if return_lse else out
+        else:
+            return (out_p, out_d), (lse_p, lse_d) if return_lse else (out_p, out_d)
 
     def end_forward(self) -> None:
         r"""Warning: this function is deprecated and has no effect."""

@@ -20,6 +20,8 @@ def run_bench(
 ):
     # POD Attention only supports page size = 1 due to use of single prefill kernel
     page_block_size = 1
+    d_bs = len(d_kv_lens)
+    p_bs = len(p_kv_lens)
     seq_lens = torch.tensor(d_kv_lens + p_kv_lens, dtype=torch.int32)
     q_lens = torch.tensor(d_qo_lens + p_qo_lens, dtype=torch.int32)
 
@@ -67,10 +69,11 @@ def run_bench(
         backend="fa2",
     )
     last_page_len = (seq_lens - 1) % page_block_size + 1
+    kv_indices = torch.arange(num_blocks, dtype=torch.int32, device=device)
     wrapper_old.plan(
         q_indptr.to(device),
         kv_indptr.to(device),
-        torch.arange(num_blocks).int().to(device),
+        kv_indices,
         last_page_len,
         num_qo_heads,
         num_kv_heads,
@@ -108,8 +111,8 @@ def run_bench(
     kv_d = kv_data[: d_kv_indptr[-1]].unbind(1)
     q_p = q[d_q_indptr[-1] :]
     kv_p = kv_data[d_kv_indptr[-1] :].unbind(1)
-    kv_indices_d = torch.arange(0, d_kv_indptr[-1], device=device, dtype=torch.int32)
-    kv_indices_p = torch.arange(0, p_kv_indptr[-1], device=device, dtype=torch.int32)
+    # kv_indices_d = torch.arange(0, d_kv_indptr[-1], device=device, dtype=torch.int32)
+    # kv_indices_p = torch.arange(0, p_kv_indptr[-1], device=device, dtype=torch.int32)
 
     last_page_len_d = (d_seq_lens_blocks - 1) % page_block_size + 1
     last_page_len_p = (p_seq_lens_blocks - 1) % page_block_size + 1
@@ -117,17 +120,16 @@ def run_bench(
         workspace_buffer,
         kv_layout=kv_layout,
     )
-
     wrapper_pod.plan(
         # Prefill params
         p_q_indptr.to(device),
-        p_kv_indptr.to(device),
-        kv_indices_p.to(device),
+        kv_indptr[d_bs:],
+        kv_indices,
         last_page_len_p,
         # Decode params
         d_q_indptr.to(device),
-        d_kv_indptr.to(device),
-        kv_indices_d.to(device),
+        kv_indptr[:d_bs + 1],
+        kv_indices,
         last_page_len_d,
         # Common params
         num_qo_heads=num_qo_heads,
@@ -137,14 +139,14 @@ def run_bench(
         q_data_type=torch.bfloat16,
         kv_data_type=torch.bfloat16,
     )
-    o_p_batch, o_d_batch = wrapper_pod.run(
+    o_batch_pod = wrapper_pod.run(
         q_p,
-        kv_p,
+        kv_data,
         q_d,
-        kv_d,
+        kv_data,
         causal_p=causal,
     )
-    o_batch_pod = torch.cat([o_d_batch, o_p_batch], dim=0)
+    # o_batch_pod = torch.cat([o_d_batch, o_p_batch], dim=0)
 
     # Verify output matches
     torch.testing.assert_close(
@@ -153,9 +155,9 @@ def run_bench(
     measurements = bench_gpu_time(
         lambda: wrapper_pod.run(
             q_p,
-            kv_p,
+            kv_data,
             q_d,
-            kv_d,
+            kv_data,
             causal_p=causal,
         )
     )
