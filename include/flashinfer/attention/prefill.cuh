@@ -2364,7 +2364,6 @@ __device__ __forceinline__ void BatchPrefillWithPagedKVCacheDevice(
       // threadblock synchronization
       threadblock_sync_mdo_states<KTraits>(o_frag, &smem_storage, m, d, warp_idx, lane_idx, tid);
     }
-
     const uint32_t num_kv_chunks =
         ceil_div(min(kv_len_safe, window_left + CTA_TILE_Q), kv_chunk_size);
 

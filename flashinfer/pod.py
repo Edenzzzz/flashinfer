@@ -739,6 +739,12 @@ class BatchPODWithPagedKVCacheWrapper:
 
         self._fixed_batch_size = 0
 
+        # SM aware scheduling buffer, requires SMs count + 2 entries
+        dev_prop = torch.cuda.get_device_properties(self.device)
+        self._sm_aware_sched = torch.empty(
+            (dev_prop.multi_processor_count + 2), dtype=torch.int, device=self.device
+        )
+
         self._paged_kv_indptr_buf = None
         self._paged_kv_indices_buf = None
         self._paged_kv_last_page_len_buf = None
@@ -839,6 +845,7 @@ class BatchPODWithPagedKVCacheWrapper:
 
         # Setup prefill params
         batch_size_p = len(last_page_len_p)
+        self.batch_size_p = batch_size_p
         qo_indptr_host_p = qo_indptr_p.to("cpu")
         total_num_rows_p = int(qo_indptr_host_p[-1])
         self._kv_indptr_buf_p = kv_indptr_p.to(self.device, non_blocking=non_blocking)
@@ -854,7 +861,6 @@ class BatchPODWithPagedKVCacheWrapper:
         kv_lens_arr_host_p = get_seq_lens(
             kv_indptr_host_p, last_page_len_host_p, page_size
         )
-
         if data_type is not None:
             if q_data_type is None:
                 q_data_type = data_type
@@ -887,6 +893,7 @@ class BatchPODWithPagedKVCacheWrapper:
 
         # Setup decode params
         batch_size_d = len(last_page_len_d)
+        self.batch_size_d = batch_size_d
         qo_indptr_host_d = qo_indptr_d.to("cpu")
         total_num_rows_d = int(qo_indptr_host_d[-1])
         self._kv_indptr_buf_d = kv_indptr_d.to(self.device, non_blocking=non_blocking)
@@ -1035,6 +1042,7 @@ class BatchPODWithPagedKVCacheWrapper:
         lse_d = None
         lse_p = None
         if join_outputs:
+            # (TODO Wenxuan) This somehow causes illegal memory access
             out = torch.empty(
                 q_d.shape[0] + q_p.shape[0],
                 q_p.shape[1],
@@ -1057,8 +1065,12 @@ class BatchPODWithPagedKVCacheWrapper:
             out_p = torch.empty_like(q_p)
             out_d = torch.empty_like(q_d)
             if return_lse:
-                lse_d = torch.empty_like(q_d)
-                lse_p = torch.empty_like(q_p)
+                lse_d = torch.empty(
+                    q_d.shape[0], q_d.shape[1], device=q_d.device, dtype=torch.float32
+                )
+                lse_p = torch.empty(
+                    q_p.shape[0], q_p.shape[1], device=q_p.device, dtype=torch.float32
+                )
 
         # Decode setup
         k_cache_d, v_cache_d = _unpack_paged_kv_cache(paged_kv_cache_d, self._kv_layout)
@@ -1109,7 +1121,7 @@ class BatchPODWithPagedKVCacheWrapper:
             window_left_d != -1,  # use_sliding_window
             logits_soft_cap_d > 0,  # use_logits_soft_cap
         )
-        module_getter.run_tensor(
+        args = (
             # Prefill params
             self._float_workspace_buffer_p,
             self._int_workspace_buffer_p,
@@ -1156,8 +1168,11 @@ class BatchPODWithPagedKVCacheWrapper:
             sm_scale_d,
             1.0 / rope_scale_d,
             1.0 / rope_theta_d,
+            self._sm_aware_sched,
             enable_pdl,
         )
+
+        module_getter.run_tensor(*args)
 
         if v_scale is not None:
             out_d *= v_scale
