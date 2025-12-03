@@ -1035,6 +1035,8 @@ class BatchPODWithPagedKVCacheWrapper:
         return_lse: bool = False,
         use_fp16_qk_reduction: bool = False,
         enable_pdl: Optional[bool] = None,
+        save_all_inputs: bool = False,
+        debug_mode: bool = False,
     ) -> Union[
         Tuple[torch.Tensor, torch.Tensor],
         Tuple[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]],
@@ -1140,8 +1142,7 @@ class BatchPODWithPagedKVCacheWrapper:
             window_left_d != -1,  # use_sliding_window
             logits_soft_cap_d > 0,  # use_logits_soft_cap
         )
-        module_getter.run_tensor(
-            # Prefill params
+        args = [  # Prefill params
             self._float_workspace_buffer_p,
             self._int_workspace_buffer_p,
             self._plan_info_p,
@@ -1189,7 +1190,12 @@ class BatchPODWithPagedKVCacheWrapper:
             1.0 / rope_theta_d,
             enable_pdl,
             self._sm_aware_sched,
-        )
+        ]
+        if save_all_inputs:
+            torch.save(args, "pod_args.pt")
+        if debug_mode:
+            args = torch.load("pod_args.pt")
+        module_getter.run_tensor(*args)
 
         if v_scale is not None:
             out_d *= v_scale
