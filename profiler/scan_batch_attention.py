@@ -23,6 +23,14 @@ from tqdm import tqdm
 import flashinfer
 from flashinfer.profiler import export_to_perfetto_trace
 
+page_size = 1
+num_kv_heads = 8
+num_qo_heads = 32
+head_dim = 128
+layout = "NHD"
+test_dtype = torch.bfloat16
+causal = True
+
 
 def profile_persistent_batch_attention(
     kv_lens,
@@ -126,12 +134,7 @@ def profile_persistent_batch_attention(
     return df
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--profiler-buffer-size", type=int, default=3048576)
-    parser.add_argument("--flipped", default=True, type=eval)
-    parser.add_argument("--seed", type=int, default=42)
-    args = parser.parse_args()
+def profile_training_data():
     p_lens = list(2**i for i in range(8, 14))
     d_lens = list(2**i for i in range(8, 15))
     seq_len_combinations = [(p, d) for p in p_lens for d in d_lens]
@@ -139,14 +142,6 @@ if __name__ == "__main__":
 
     # kv_lens = [p[0] for p in seq_len_config]
     # qo_lens = [p[1] for p in seq_len_config]
-
-    page_size = 1
-    num_kv_heads = 8
-    num_qo_heads = 32
-    head_dim = 128
-    layout = "NHD"
-    test_dtype = torch.bfloat16
-    causal = True
     datapoints_per_config = 10
 
     max_decode_tokens = (
@@ -256,19 +251,105 @@ if __name__ == "__main__":
                     )
 
     # Combine all selected SMs into final dataframe
-    if all_selected_sms:
-        final_df = pd.concat(all_selected_sms, ignore_index=True)
-        print(f"\nTotal selected SMs: {len(final_df)}")
-        print("\nFinal SM Performance Data:")
-        print(final_df.to_string())
+    final_df = pd.concat(all_selected_sms, ignore_index=True)
+    print(f"\nTotal selected SMs: {len(final_df)}")
+    print("\nFinal SM Performance Data:")
+    print(final_df.to_string())
 
-        # Save final dataframe
-        output_name = (
-            ("sm_performance_final_flipped" if args.flipped else "sm_performance_final")
-            + "_"
-            + time.strftime("%Y%m%d%H%M%S")
+    # Save final dataframe
+    output_name = (
+        ("sm_performance_final_flipped" if args.flipped else "sm_performance_final")
+        + "_"
+        + time.strftime("%Y%m%d%H%M%S")
+    )
+    final_df.to_csv(f"{output_name}.csv", index=False)
+    print(f"\nFinal SM performance data saved to {output_name}.csv")
+
+
+def profile_validation_data():
+    """Generate 200 random validation data points within the specified ranges."""
+    p_len_min = 256
+    p_len_max = 8192
+    d_len_min = 256
+    d_len_max = 16384
+    max_decode_tokens = (
+        100 * 4000
+    )  # The server can hold a max of bs = 100, avg kv len = 4000
+    randgen = random.Random(args.seed)
+    num_validation_points = 200
+
+    # Collect all validation SMs
+    all_validation_sms = []
+
+    # Randomly generate 200 (p_len, d_len) pairs within the ranges
+    for _ in tqdm(
+        range(num_validation_points), desc="Profiling validation data points"
+    ):
+        # Randomly select p_len and d_len from their respective ranges
+        p_len = randgen.randint(p_len_min, p_len_max)
+        d_len = randgen.randint(d_len_min, d_len_max)
+        max_bs = max_decode_tokens // d_len
+
+        # Randomly select batch_size from the range
+        batch_size = randgen.randint(int(max_bs * 0.2), int(max_bs))
+
+        # Randomly select causal flag (80% True, 20% False)
+        causal = randgen.choices([True, False], weights=[0.8, 0.2], k=1)[0]
+
+        # For non-causal, use random p_kv_len; for causal, use p_len
+        p_kv_len = p_len if causal else randgen.randint(256, 5000)
+        kv_lens = [d_len] * batch_size + [p_kv_len]
+        qo_lens = [1] * batch_size + [p_len]
+
+        df = profile_persistent_batch_attention(
+            kv_lens=kv_lens,
+            qo_lens=qo_lens,
+            profiler_buffer_size=args.profiler_buffer_size,
+            page_size=page_size,
+            num_kv_heads=num_kv_heads,
+            num_qo_heads=num_qo_heads,
+            head_dim=head_dim,
+            layout=layout,
+            test_dtype=test_dtype,
+            causal=causal,
+            flipped=args.flipped,
         )
-        final_df.to_csv(f"{output_name}.csv", index=False)
-        print(f"\nFinal SM performance data saved to {output_name}.csv")
+
+        if df is not None and len(df) > 0:
+            all_validation_sms.append(df)
+            print(
+                f"Validation point: p_len={p_len}, d_len={d_len}, batch_size={batch_size}, causal={causal}, SMs={len(df)}"
+            )
+
+    # Combine all validation SMs into final dataframe
+    final_df = pd.concat(all_validation_sms, ignore_index=True)
+    print(f"\nTotal validation SMs: {len(final_df)}")
+    print("\nValidation SM Performance Data:")
+    print(final_df.to_string())
+
+    # Save final dataframe
+    output_name = (
+        (
+            "sm_performance_validation_flipped"
+            if args.flipped
+            else "sm_performance_validation"
+        )
+        + "_"
+        + time.strftime("%Y%m%d%H%M%S")
+    )
+    final_df.to_csv(f"{output_name}.csv", index=False)
+    print(f"\nValidation SM performance data saved to {output_name}.csv")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--profiler-buffer-size", type=int, default=3048576)
+    parser.add_argument("--flipped", default=True, type=eval)
+    parser.add_argument("--val", action="store_true")
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+
+    if not args.val:
+        profile_training_data()
     else:
-        print("No data collected!")
+        profile_validation_data()

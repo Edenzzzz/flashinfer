@@ -171,20 +171,17 @@ def main(args):
         y_actual_unscaled = scaler_y.inverse_transform(y_scaled.reshape(-1, 1)).ravel()
 
         # Calculate metrics
-        mse = np.mean((y_actual_unscaled - y_pred_unscaled) ** 2)
-        rmse = np.sqrt(mse)
-        mae = np.mean(np.abs(y_actual_unscaled - y_pred_unscaled))
-        r2 = 1 - np.sum((y_actual_unscaled - y_pred_unscaled) ** 2) / np.sum(
-            (y_actual_unscaled - np.mean(y_actual_unscaled)) ** 2
+        mean_deviation_ms = np.mean(np.abs(y_actual_unscaled - y_pred_unscaled))
+        mean_deviation_pct = (
+            np.mean(np.abs((y_actual_unscaled - y_pred_unscaled) / y_actual_unscaled))
+            * 100
         )
 
         print("\n" + "=" * 80)
         print("Model Performance:")
         print("=" * 80)
-        print(f"MSE: {mse:.6f}")
-        print(f"RMSE: {rmse:.6f} ms")
-        print(f"MAE: {mae:.6f} ms")
-        print(f"R²: {r2:.6f}")
+        print(f"Mean Deviation: {mean_deviation_ms:.6f} ms")
+        print(f"Mean Deviation: {mean_deviation_pct:.4f}%")
 
         # Create visualization
         plt.figure(figsize=(12, 5))
@@ -200,7 +197,7 @@ def main(args):
         )
         plt.xlabel("Actual SM Time (ms)")
         plt.ylabel("Predicted SM Time (ms)")
-        plt.title(f"Predicted vs Actual (R² = {r2:.3f})")
+        plt.title(f"Predicted vs Actual (Mean Dev = {mean_deviation_pct:.2f}%)")
         plt.grid(True, alpha=0.3)
 
         # Plot 2: Residuals
@@ -256,6 +253,8 @@ def main(args):
                 "decode_kv_len": r_d,
                 "actual_time": y_actual_unscaled,
                 "predicted_time": y_pred_unscaled,
+                "mean_deviation_ms": mean_deviation_ms,
+                "mean_deviation_pct": mean_deviation_pct,
                 "residual": residuals,
                 "R_pd": R_pd,
             }
