@@ -207,10 +207,91 @@ class BatchAttention:
         if recommended_schedule != schedule_placeholder and flipped_schedule is None:
             get_module_args[-1] = recommended_schedule
             self.module = get_holistic_attention_module(*get_module_args)
+
+        idtype = kv_indptr_host.dtype
+        # Extract task-wise q_indptr and kv_indptr for profiling
+        self._task_info = self._extract_task_info(idtype)
         # self.forward_count += 1
         # if recommended_schedule != schedule_placeholder and flipped_schedule is None:
         #     self.flipped_count += 1
         #     print(f"forward {self.forward_count}, recommended schedule is {recommended_schedule} ({self.flipped_count}/{self.forward_count})")
+
+    def _extract_task_info(self, idtype):
+        """Extract task-wise q_len and kv_len from plan_info.
+
+        Returns:
+            dict with keys:
+            - 'decode': {'q_len': tensor, 'kv_len': tensor, 'work_indptr': tensor, 'num_works': int, 'num_clusters': int}
+            - 'prefill': {'q_len': tensor, 'kv_len': tensor, 'work_indptr': tensor, 'num_works': int, 'num_clusters': int}
+        """
+        NUM_TASKS = 2
+        NUM_TASK_ARGS = 10
+        INT32_SIZE = 4  # sizeof(int32) in bytes
+
+        # Parse plan_info structure
+        # plan_info = [num_blks_x, num_blks_y, ...task0_args..., ...task1_args..., ...shared_args..., flipped_schedule]
+        num_blks_y = self._plan_info[1]
+
+        task_info = {}
+        task_names = ["prefill", "decode"]
+
+        for task_idx in range(NUM_TASKS):
+            base_idx = 2 + task_idx * NUM_TASK_ARGS
+            q_len_offset = self._plan_info[base_idx + 3]
+            kv_len_offset = self._plan_info[base_idx + 4]
+            work_indptr_offset = self._plan_info[base_idx + 9]
+            num_clusters = int(num_blks_y)
+
+            work_indptr_size = num_clusters + 1
+
+            # Read work_indptr to get num_works
+            # Offset is in bytes, buffer is uint8 (1 byte per element), so use offset directly
+            # Each int32 element is 4 bytes, so we need (num_clusters + 1) * 4 bytes
+            work_indptr_bytes = work_indptr_size * INT32_SIZE
+            work_end_idx = work_indptr_offset + work_indptr_bytes
+            if work_end_idx > len(self.int_workspace_buffer):
+                raise ValueError(
+                    f"work_indptr_offset {work_indptr_offset} is out of bounds"
+                )
+
+            work_indptr = (
+                self.int_workspace_buffer[work_indptr_offset:work_end_idx]
+                .view(dtype=idtype)
+                .cpu()
+            )
+
+            num_works = int(work_indptr[-1].item()) if len(work_indptr) > 0 else 0
+
+            # Read q_len and kv_len
+            if num_works > 0:
+                # Check bounds for each array
+                # Each int32 element is 4 bytes
+                def safe_read(offset, num_elements):
+                    num_bytes = num_elements * INT32_SIZE
+                    end_idx = offset + num_bytes
+                    if end_idx > len(self.int_workspace_buffer):
+                        raise ValueError(f"offset {offset} is out of bounds")
+                    return (
+                        self.int_workspace_buffer[offset:end_idx]
+                        .view(dtype=idtype)
+                        .cpu()
+                    )
+
+                q_len = safe_read(q_len_offset, num_works)
+                kv_len = safe_read(kv_len_offset, num_works)
+            else:
+                q_len = torch.tensor([], dtype=idtype)
+                kv_len = torch.tensor([], dtype=idtype)
+
+            task_info[task_names[task_idx]] = {
+                "q_len": q_len,
+                "kv_len": kv_len,
+                "work_indptr": work_indptr,
+                "num_works": num_works,
+                "num_clusters": num_clusters,
+            }
+
+        return task_info
 
     def run(
         self,
