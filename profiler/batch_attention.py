@@ -114,17 +114,18 @@ def profile_persistent_batch_attention(
     export_to_perfetto_trace(profiler_buffer, events, trace_name)
 
     print(f"Profile trace exported to {trace_name}")
-    
+
     # Analyze SM performance if task_info is available
-    if hasattr(wrapper, '_task_info') and wrapper._task_info is not None:
+    if hasattr(wrapper, "_task_info") and wrapper._task_info is not None:
         from flashinfer.profiler import analyze_sm_performance
+
         df = analyze_sm_performance(profiler_buffer, wrapper._task_info, events)
-        df = df.sort_values(by='sm_time', ascending=False)
+        df = df.sort_values(by="sm_time", ascending=False)
         if df is not None:
             print("\nSM Performance Analysis:")
             print(df.to_string())
             df.to_csv("sm_performance.csv", index=False)
-            print(f"\nSM performance data saved to sm_performance.csv")
+            print("\nSM performance data saved to sm_performance.csv")
 
 
 def persistent_batch_attention(

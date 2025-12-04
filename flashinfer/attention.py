@@ -60,7 +60,7 @@ class BatchAttention:
             )
         else:
             self.float_workspace_buffer = float_workspace_buffer
-            
+
         self.int_workspace_buffer = torch.empty(
             8 * 1024 * 1024,
             dtype=torch.uint8,
@@ -105,7 +105,7 @@ class BatchAttention:
         self._paged_kv_indices_buf = paged_kv_indices_buffer
         self._kv_len_arr_buf = kv_len_arr_buffer
         self.begin_forward = self.plan
-        
+
     @property
     def is_cuda_graph_enabled(self) -> bool:
         return self._use_cuda_graph
@@ -183,7 +183,7 @@ class BatchAttention:
             self._qo_indptr_buf = qo_indptr.to(self.device, non_blocking=True)
             self._paged_kv_indices_buf = kv_indices.to(self.device, non_blocking=True)
             self._kv_len_arr_buf = kv_len_arr.to(self.device, non_blocking=True)
-            
+
         qo_indptr_host = qo_indptr.to(torch.device("cpu"), non_blocking=True)
         kv_indptr_host = kv_indptr.to(torch.device("cpu"), non_blocking=True)
         kv_len_arr_host = kv_len_arr.to(torch.device("cpu"), non_blocking=True)

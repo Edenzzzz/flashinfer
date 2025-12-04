@@ -6,7 +6,6 @@ import argparse
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LinearRegression
 from scipy.optimize import minimize
 import matplotlib.pyplot as plt
 
@@ -20,21 +19,21 @@ def main(args):
     print("=" * 80)
     print(f"\nData shape: {df.shape}")
     print(f"\nColumns: {list(df.columns)}")
-    print(f"\nFirst few rows:")
+    print("\nFirst few rows:")
     print(df.head())
 
     # Extract variables
     # n_{i,p} = prefill_qo_len
     # r_{i,p} = prefill_kv_len
     # r_{i,d} = decode_kv_len
-    n_p = df['prefill_qo_len'].values
-    r_p = df['prefill_kv_len'].values
-    r_d = df['decode_kv_len'].values
+    n_p = df["prefill_qo_len"].values
+    r_p = df["prefill_kv_len"].values
+    r_d = df["decode_kv_len"].values
 
     # Target: total execution time
-    y = df['sm_time'].values
+    y = df["sm_time"].values
 
-    print(f"\nData ranges:")
+    print("\nData ranges:")
     print(f"prefill_qo_len: [{n_p.min()}, {n_p.max()}]")
     print(f"prefill_kv_len: [{r_p.min()}, {r_p.max()}]")
     print(f"decode_kv_len: [{r_d.min()}, {r_d.max()}]")
@@ -56,7 +55,9 @@ def main(args):
     sum_r_d = r_d  # Total decode kv length for this SM
 
     # Calculate S_p, S_d, R_{pd} for each SM
-    S_p = sum_n_p * (sum_n_p / (sum_n_p + sum_r_p + 1e-10))  # Add small epsilon to avoid division by zero
+    S_p = sum_n_p * (
+        sum_n_p / (sum_n_p + sum_r_p + 1e-10)
+    )  # Add small epsilon to avoid division by zero
     S_d = sum_r_d
     R_pd = S_d / (S_p + S_d + 1e-10)  # Add small epsilon to avoid division by zero
 
@@ -71,7 +72,7 @@ def main(args):
     feature_rp_np = sum_r_p * sum_n_p  # r_{i,p} * n_{i,p}
     feature_rp = sum_r_p
     feature_np = sum_n_p
-    feature_rd_sq = sum_r_d ** 2
+    feature_rd_sq = sum_r_d**2
     feature_rd = sum_r_d
 
     # Build feature matrix X
@@ -85,13 +86,15 @@ def main(args):
     scaler_X = StandardScaler()
     scaler_y = StandardScaler()
 
-    X_features = np.column_stack([
-        feature_rp_np,
-        feature_rp,
-        feature_np,
-        feature_rd_sq,
-        feature_rd,
-    ])
+    X_features = np.column_stack(
+        [
+            feature_rp_np,
+            feature_rp,
+            feature_np,
+            feature_rd_sq,
+            feature_rd,
+        ]
+    )
 
     X_scaled = scaler_X.fit_transform(X_features)
     y_scaled = scaler_y.fit_transform(y.reshape(-1, 1)).ravel()
@@ -105,19 +108,19 @@ def main(args):
         where Speedup = α₁*R_{pd} + α₂*R_{pd}² + α₃
         """
         alpha1, alpha2, alpha3, theta1, theta2, theta3, theta4, theta5, beta = params
-        
+
         # Calculate speedup for each sample
-        speedup = alpha1 * R_pd + alpha2 * (R_pd ** 2) + alpha3
-        
+        speedup = alpha1 * R_pd + alpha2 * (R_pd**2) + alpha3
+
         # Calculate weighted features
         weighted_features = (
-            theta1 * X[:, 0] +  # r_{i,p} * n_{i,p}
-            theta2 * X[:, 1] +  # r_{i,p}
-            theta3 * X[:, 2] +  # n_{i,p}
-            theta4 * X[:, 3] +  # r_{i,d}^2
-            theta5 * X[:, 4]    # r_{i,d}
+            theta1 * X[:, 0]  # r_{i,p} * n_{i,p}
+            + theta2 * X[:, 1]  # r_{i,p}
+            + theta3 * X[:, 2]  # n_{i,p}
+            + theta4 * X[:, 3]  # r_{i,d}^2
+            + theta5 * X[:, 4]  # r_{i,d}
         )
-        
+
         # Apply speedup and add bias
         y_pred = speedup * weighted_features + beta
         return y_pred
@@ -140,13 +143,13 @@ def main(args):
         loss_function,
         initial_params,
         args=(X_scaled, y_scaled, R_pd),
-        method='L-BFGS-B',
-        options={'maxiter': 1000, 'disp': True}
+        method="L-BFGS-B",
+        options={"maxiter": 1000, "disp": True},
     )
 
     if result.success:
         alpha1, alpha2, alpha3, theta1, theta2, theta3, theta4, theta5, beta = result.x
-        
+
         print("\n" + "=" * 80)
         print("Fitted Parameters:")
         print("=" * 80)
@@ -159,20 +162,22 @@ def main(args):
         print(f"θ₄ (r_d² coefficient): {theta4:.6f}")
         print(f"θ₅ (r_d coefficient): {theta5:.6f}")
         print(f"β (bias): {beta:.6f}")
-        
+
         # Calculate predictions
         y_pred = model(result.x, X_scaled, R_pd)
-        
+
         # Unscale predictions and actual values
         y_pred_unscaled = scaler_y.inverse_transform(y_pred.reshape(-1, 1)).ravel()
         y_actual_unscaled = scaler_y.inverse_transform(y_scaled.reshape(-1, 1)).ravel()
-        
+
         # Calculate metrics
         mse = np.mean((y_actual_unscaled - y_pred_unscaled) ** 2)
         rmse = np.sqrt(mse)
         mae = np.mean(np.abs(y_actual_unscaled - y_pred_unscaled))
-        r2 = 1 - np.sum((y_actual_unscaled - y_pred_unscaled) ** 2) / np.sum((y_actual_unscaled - np.mean(y_actual_unscaled)) ** 2)
-        
+        r2 = 1 - np.sum((y_actual_unscaled - y_pred_unscaled) ** 2) / np.sum(
+            (y_actual_unscaled - np.mean(y_actual_unscaled)) ** 2
+        )
+
         print("\n" + "=" * 80)
         print("Model Performance:")
         print("=" * 80)
@@ -180,66 +185,84 @@ def main(args):
         print(f"RMSE: {rmse:.6f} ms")
         print(f"MAE: {mae:.6f} ms")
         print(f"R²: {r2:.6f}")
-        
+
         # Create visualization
         plt.figure(figsize=(12, 5))
-        
+
         # Plot 1: Predicted vs Actual
         plt.subplot(1, 2, 1)
         plt.scatter(y_actual_unscaled, y_pred_unscaled, alpha=0.6)
-        plt.plot([y_actual_unscaled.min(), y_actual_unscaled.max()], 
-                 [y_actual_unscaled.min(), y_actual_unscaled.max()], 'r--', lw=2)
-        plt.xlabel('Actual SM Time (ms)')
-        plt.ylabel('Predicted SM Time (ms)')
-        plt.title(f'Predicted vs Actual (R² = {r2:.3f})')
+        plt.plot(
+            [y_actual_unscaled.min(), y_actual_unscaled.max()],
+            [y_actual_unscaled.min(), y_actual_unscaled.max()],
+            "r--",
+            lw=2,
+        )
+        plt.xlabel("Actual SM Time (ms)")
+        plt.ylabel("Predicted SM Time (ms)")
+        plt.title(f"Predicted vs Actual (R² = {r2:.3f})")
         plt.grid(True, alpha=0.3)
-        
+
         # Plot 2: Residuals
         plt.subplot(1, 2, 2)
         residuals = y_actual_unscaled - y_pred_unscaled
         plt.scatter(y_pred_unscaled, residuals, alpha=0.6)
-        plt.axhline(y=0, color='r', linestyle='--', lw=2)
-        plt.xlabel('Predicted SM Time (ms)')
-        plt.ylabel('Residuals (ms)')
-        plt.title('Residual Plot')
+        plt.axhline(y=0, color="r", linestyle="--", lw=2)
+        plt.xlabel("Predicted SM Time (ms)")
+        plt.ylabel("Residuals (ms)")
+        plt.title("Residual Plot")
         plt.grid(True, alpha=0.3)
-        
+
         plt.tight_layout()
         plt.savefig("sm_cost_model_fit.png", dpi=150, bbox_inches="tight")
         print("\nSaved plot to sm_cost_model_fit.png")
-        
+
         # Save model parameters
-        params_df = pd.DataFrame({
-            'parameter': ['alpha1', 'alpha2', 'alpha3', 'theta1', 'theta2', 'theta3', 'theta4', 'theta5', 'beta'],
-            'value': result.x,
-            'description': [
-                'R_pd coefficient',
-                'R_pd² coefficient',
-                'Speedup intercept',
-                'r_p*n_p coefficient',
-                'r_p coefficient',
-                'n_p coefficient',
-                'r_d² coefficient',
-                'r_d coefficient',
-                'Bias term'
-            ]
-        })
+        params_df = pd.DataFrame(
+            {
+                "parameter": [
+                    "alpha1",
+                    "alpha2",
+                    "alpha3",
+                    "theta1",
+                    "theta2",
+                    "theta3",
+                    "theta4",
+                    "theta5",
+                    "beta",
+                ],
+                "value": result.x,
+                "description": [
+                    "R_pd coefficient",
+                    "R_pd² coefficient",
+                    "Speedup intercept",
+                    "r_p*n_p coefficient",
+                    "r_p coefficient",
+                    "n_p coefficient",
+                    "r_d² coefficient",
+                    "r_d coefficient",
+                    "Bias term",
+                ],
+            }
+        )
         params_df.to_csv("sm_cost_model_parameters.csv", index=False)
         print("Saved model parameters to sm_cost_model_parameters.csv")
-        
+
         # Save predictions
-        results_df = pd.DataFrame({
-            'prefill_qo_len': n_p,
-            'prefill_kv_len': r_p,
-            'decode_kv_len': r_d,
-            'actual_time': y_actual_unscaled,
-            'predicted_time': y_pred_unscaled,
-            'residual': residuals,
-            'R_pd': R_pd,
-        })
+        results_df = pd.DataFrame(
+            {
+                "prefill_qo_len": n_p,
+                "prefill_kv_len": r_p,
+                "decode_kv_len": r_d,
+                "actual_time": y_actual_unscaled,
+                "predicted_time": y_pred_unscaled,
+                "residual": residuals,
+                "R_pd": R_pd,
+            }
+        )
         results_df.to_csv("sm_cost_model_predictions.csv", index=False)
         print("Saved predictions to sm_cost_model_predictions.csv")
-        
+
     else:
         print(f"\nOptimization failed: {result.message}")
 
@@ -249,7 +272,9 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Fit regression model for SM execution time prediction")
+    parser = argparse.ArgumentParser(
+        description="Fit regression model for SM execution time prediction"
+    )
     parser.add_argument(
         "--csv-path",
         type=str,
@@ -258,4 +283,3 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     main(args)
-

@@ -27,10 +27,14 @@ if "prefill_qo_len" in df.columns:
         corr = df["prefill_qo_len"].corr(df["prefill_time_ms"])
         correlations["prefill_qo_len vs prefill_time_ms"] = corr
         print(f"\n1. Correlation (prefill_qo_len vs prefill_time_ms): {corr:.4f}")
-        pearson_r, pearson_p = stats.pearsonr(df["prefill_qo_len"], df["prefill_time_ms"])
+        pearson_r, pearson_p = stats.pearsonr(
+            df["prefill_qo_len"], df["prefill_time_ms"]
+        )
         print(f"   Pearson r: {pearson_r:.4f}, p-value: {pearson_p:.4e}")
     else:
-        print("\n1. prefill_time_ms not found in CSV, skipping prefill_qo_len vs prefill_time_ms")
+        print(
+            "\n1. prefill_time_ms not found in CSV, skipping prefill_qo_len vs prefill_time_ms"
+        )
 
 # 2. Correlation between prefill_qo_len and sm_time
 if "prefill_qo_len" in df.columns and "sm_time" in df.columns:
@@ -49,7 +53,9 @@ if "decode_kv_len" in df.columns:
         pearson_r, pearson_p = stats.pearsonr(df["decode_kv_len"], df["decode_time_ms"])
         print(f"   Pearson r: {pearson_r:.4f}, p-value: {pearson_p:.4e}")
     else:
-        print("\n3. decode_time_ms not found in CSV, skipping decode_kv_len vs decode_time_ms")
+        print(
+            "\n3. decode_time_ms not found in CSV, skipping decode_kv_len vs decode_time_ms"
+        )
 
 # 4. Correlation between decode_qo_len and decode_time_ms (if available)
 if "decode_qo_len" in df.columns:
@@ -60,7 +66,9 @@ if "decode_qo_len" in df.columns:
         pearson_r, pearson_p = stats.pearsonr(df["decode_qo_len"], df["decode_time_ms"])
         print(f"   Pearson r: {pearson_r:.4f}, p-value: {pearson_p:.4e}")
     else:
-        print("\n4. decode_time_ms not found in CSV, skipping decode_qo_len vs decode_time_ms")
+        print(
+            "\n4. decode_time_ms not found in CSV, skipping decode_qo_len vs decode_time_ms"
+        )
 
 # 5. Correlation between decode_qo_len and sm_time
 if "decode_qo_len" in df.columns and "sm_time" in df.columns:
@@ -110,7 +118,9 @@ if "prefill_qo_len" in df.columns and "prefill_time_ms" in df.columns:
     axes[plot_idx].scatter(df["prefill_qo_len"], df["prefill_time_ms"], alpha=0.6)
     axes[plot_idx].set_xlabel("Prefill QO Length")
     axes[plot_idx].set_ylabel("Prefill Time (ms)")
-    axes[plot_idx].set_title(f"Prefill QO Len vs Prefill Time\n(r={correlations.get('prefill_qo_len vs prefill_time_ms', 0):.3f})")
+    axes[plot_idx].set_title(
+        f"Prefill QO Len vs Prefill Time\n(r={correlations.get('prefill_qo_len vs prefill_time_ms', 0):.3f})"
+    )
     z = np.polyfit(df["prefill_qo_len"], df["prefill_time_ms"], 1)
     p = np.poly1d(z)
     axes[plot_idx].plot(df["prefill_qo_len"], p(df["prefill_qo_len"]), "r--", alpha=0.8)
@@ -124,7 +134,9 @@ if "prefill_qo_len" in df.columns and "sm_time" in df.columns:
     axes[plot_idx].scatter(df["prefill_qo_len"], df["sm_time"], alpha=0.6)
     axes[plot_idx].set_xlabel("Prefill QO Length")
     axes[plot_idx].set_ylabel("SM Time (ms)")
-    axes[plot_idx].set_title(f"Prefill QO Len vs SM Time\n(r={correlations.get('prefill_qo_len vs sm_time', 0):.3f})")
+    axes[plot_idx].set_title(
+        f"Prefill QO Len vs SM Time\n(r={correlations.get('prefill_qo_len vs sm_time', 0):.3f})"
+    )
     z = np.polyfit(df["prefill_qo_len"], df["sm_time"], 1)
     p = np.poly1d(z)
     axes[plot_idx].plot(df["prefill_qo_len"], p(df["prefill_qo_len"]), "r--", alpha=0.8)
@@ -135,7 +147,9 @@ if "decode_kv_len" in df.columns and "decode_time_ms" in df.columns:
     axes[plot_idx].scatter(df["decode_kv_len"], df["decode_time_ms"], alpha=0.6)
     axes[plot_idx].set_xlabel("Decode KV Length")
     axes[plot_idx].set_ylabel("Decode Time (ms)")
-    axes[plot_idx].set_title(f"Decode KV Len vs Decode Time\n(r={correlations.get('decode_kv_len vs decode_time_ms', 0):.3f})")
+    axes[plot_idx].set_title(
+        f"Decode KV Len vs Decode Time\n(r={correlations.get('decode_kv_len vs decode_time_ms', 0):.3f})"
+    )
     z = np.polyfit(df["decode_kv_len"], df["decode_time_ms"], 1)
     p = np.poly1d(z)
     axes[plot_idx].plot(df["decode_kv_len"], p(df["decode_kv_len"]), "r--", alpha=0.8)
@@ -149,7 +163,9 @@ if "decode_qo_len" in df.columns and "decode_time_ms" in df.columns:
     axes[plot_idx].scatter(df["decode_qo_len"], df["decode_time_ms"], alpha=0.6)
     axes[plot_idx].set_xlabel("Decode QO Length")
     axes[plot_idx].set_ylabel("Decode Time (ms)")
-    axes[plot_idx].set_title(f"Decode QO Len vs Decode Time\n(r={correlations.get('decode_qo_len vs decode_time_ms', 0):.3f})")
+    axes[plot_idx].set_title(
+        f"Decode QO Len vs Decode Time\n(r={correlations.get('decode_qo_len vs decode_time_ms', 0):.3f})"
+    )
     z = np.polyfit(df["decode_qo_len"], df["decode_time_ms"], 1)
     p = np.poly1d(z)
     axes[plot_idx].plot(df["decode_qo_len"], p(df["decode_qo_len"]), "r--", alpha=0.8)
@@ -163,7 +179,9 @@ if "decode_qo_len" in df.columns and "sm_time" in df.columns:
     axes[plot_idx].scatter(df["decode_qo_len"], df["sm_time"], alpha=0.6)
     axes[plot_idx].set_xlabel("Decode QO Length")
     axes[plot_idx].set_ylabel("SM Time (ms)")
-    axes[plot_idx].set_title(f"Decode QO Len vs SM Time\n(r={correlations.get('decode_qo_len vs sm_time', 0):.3f})")
+    axes[plot_idx].set_title(
+        f"Decode QO Len vs SM Time\n(r={correlations.get('decode_qo_len vs sm_time', 0):.3f})"
+    )
     z = np.polyfit(df["decode_qo_len"], df["sm_time"], 1)
     p = np.poly1d(z)
     axes[plot_idx].plot(df["decode_qo_len"], p(df["decode_qo_len"]), "r--", alpha=0.8)
@@ -174,7 +192,9 @@ if "decode_kv_len" in df.columns and "sm_time" in df.columns:
     axes[plot_idx].scatter(df["decode_kv_len"], df["sm_time"], alpha=0.6)
     axes[plot_idx].set_xlabel("Decode KV Length")
     axes[plot_idx].set_ylabel("SM Time (ms)")
-    axes[plot_idx].set_title(f"Decode KV Len vs SM Time\n(r={correlations.get('decode_kv_len vs sm_time', 0):.3f})")
+    axes[plot_idx].set_title(
+        f"Decode KV Len vs SM Time\n(r={correlations.get('decode_kv_len vs sm_time', 0):.3f})"
+    )
     z = np.polyfit(df["decode_kv_len"], df["sm_time"], 1)
     p = np.poly1d(z)
     axes[plot_idx].plot(df["decode_kv_len"], p(df["decode_kv_len"]), "r--", alpha=0.8)
@@ -197,7 +217,9 @@ corr_cols = time_cols + len_cols
 if len(corr_cols) > 1:
     corr_matrix = df[corr_cols].corr()
     plt.figure(figsize=(10, 8))
-    sns.heatmap(corr_matrix, annot=True, fmt=".3f", cmap="coolwarm", center=0, square=True)
+    sns.heatmap(
+        corr_matrix, annot=True, fmt=".3f", cmap="coolwarm", center=0, square=True
+    )
     plt.title("Correlation Heatmap: Lengths vs Times")
     plt.tight_layout()
     plt.savefig("sm_performance_heatmap.png", dpi=150, bbox_inches="tight")
@@ -206,4 +228,3 @@ if len(corr_cols) > 1:
 print("\n" + "=" * 80)
 print("Analysis complete!")
 print("=" * 80)
-
