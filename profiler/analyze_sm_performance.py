@@ -125,6 +125,126 @@ def main(args):
     print("=" * 80)
     print(df.describe())
 
+    # Group by 4-tuple and analyze variance
+    print("\n" + "=" * 80)
+    print(
+        "Grouping by 4-tuple (prefill_qo_len, prefill_kv_len, decode_qo_len, decode_kv_len)"
+    )
+    print("=" * 80)
+
+    if all(
+        col in df.columns
+        for col in [
+            "prefill_qo_len",
+            "prefill_kv_len",
+            "decode_qo_len",
+            "decode_kv_len",
+            "sm_time",
+        ]
+    ):
+        # Group by the 4-tuple
+        grouped = df.groupby(
+            ["prefill_qo_len", "prefill_kv_len", "decode_qo_len", "decode_kv_len"]
+        )
+
+        # Calculate statistics for each group
+        group_stats = (
+            grouped["sm_time"]
+            .agg(["count", "mean", "std", "var", "min", "max"])
+            .reset_index()
+        )
+        group_stats.columns = [
+            "prefill_qo_len",
+            "prefill_kv_len",
+            "decode_qo_len",
+            "decode_kv_len",
+            "count",
+            "mean",
+            "std",
+            "variance",
+            "min",
+            "max",
+        ]
+
+        # Calculate coefficient of variation (CV) = std / mean
+        group_stats["cv"] = (
+            group_stats["std"] / (group_stats["mean"] + 1e-10) * 100
+        )  # as percentage
+
+        # Sort by variance (descending) to see which groups have highest variance
+        group_stats_sorted = group_stats.sort_values("variance", ascending=False)
+
+        print(f"\nTotal unique configurations: {len(group_stats)}")
+        print(f"Total data points: {len(df)}")
+        print(f"Average samples per configuration: {len(df) / len(group_stats):.2f}")
+
+        print("\nTop 20 configurations by variance:")
+        print("=" * 120)
+        print(group_stats_sorted.head(20).to_string(index=False))
+
+        print("\nTop 20 configurations by coefficient of variation (CV = std/mean):")
+        print("=" * 120)
+        group_stats_sorted_cv = group_stats.sort_values("cv", ascending=False)
+        print(group_stats_sorted_cv.head(20).to_string(index=False))
+
+        print("\nOverall statistics across all groups:")
+        print("=" * 80)
+        print(f"Mean variance: {group_stats['variance'].mean():.6f}")
+        print(f"Median variance: {group_stats['variance'].median():.6f}")
+        print(f"Max variance: {group_stats['variance'].max():.6f}")
+        print(f"Mean CV: {group_stats['cv'].mean():.2f}%")
+        print(f"Median CV: {group_stats['cv'].median():.2f}%")
+        print(f"Max CV: {group_stats['cv'].max():.2f}%")
+
+        # Save group statistics to CSV
+        group_stats_sorted.to_csv("sm_performance_group_stats.csv", index=False)
+        print("\nSaved group statistics to sm_performance_group_stats.csv")
+
+        # Create visualization of variance distribution
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+        # Plot 1: Variance distribution
+        axes[0, 0].hist(group_stats["variance"], bins=50, alpha=0.7, edgecolor="black")
+        axes[0, 0].set_xlabel("Variance of sm_time")
+        axes[0, 0].set_ylabel("Number of Configurations")
+        axes[0, 0].set_title("Distribution of Variance Across Configurations")
+        axes[0, 0].set_yscale("log")
+        axes[0, 0].grid(True, alpha=0.3)
+
+        # Plot 2: CV distribution
+        axes[0, 1].hist(group_stats["cv"], bins=50, alpha=0.7, edgecolor="black")
+        axes[0, 1].set_xlabel("Coefficient of Variation (%)")
+        axes[0, 1].set_ylabel("Number of Configurations")
+        axes[0, 1].set_title("Distribution of CV Across Configurations")
+        axes[0, 1].grid(True, alpha=0.3)
+
+        # Plot 3: Mean vs Variance
+        axes[1, 0].scatter(group_stats["mean"], group_stats["variance"], alpha=0.6)
+        axes[1, 0].set_xlabel("Mean sm_time (ms)")
+        axes[1, 0].set_ylabel("Variance of sm_time")
+        axes[1, 0].set_title("Mean vs Variance")
+        axes[1, 0].set_xscale("log")
+        axes[1, 0].set_yscale("log")
+        axes[1, 0].grid(True, alpha=0.3)
+
+        # Plot 4: Count vs Variance
+        axes[1, 1].scatter(group_stats["count"], group_stats["variance"], alpha=0.6)
+        axes[1, 1].set_xlabel("Number of Samples in Group")
+        axes[1, 1].set_ylabel("Variance of sm_time")
+        axes[1, 1].set_title("Sample Count vs Variance")
+        axes[1, 1].set_yscale("log")
+        axes[1, 1].grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(
+            "sm_performance_variance_analysis.png", dpi=150, bbox_inches="tight"
+        )
+        print("Saved variance analysis plots to sm_performance_variance_analysis.png")
+    else:
+        print(
+            "Missing required columns for 4-tuple grouping. Need: prefill_qo_len, prefill_kv_len, decode_qo_len, decode_kv_len, sm_time"
+        )
+
     # Create visualizations
     print("\n" + "=" * 80)
     print("Generating correlation plots...")
