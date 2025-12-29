@@ -32,7 +32,7 @@ class SMCostModel(nn.Module):
     where Speedup = α₁*R_{pd} + α₂*R_{pd}² + α₃
     """
 
-    def __init__(self, standardize: bool = True):
+    def __init__(self, standardize: bool = True, use_speedup: bool = False):
         super().__init__()
         # Model parameters
         self.theta_1 = nn.Parameter(
@@ -67,6 +67,7 @@ class SMCostModel(nn.Module):
         self.register_buffer("feat_mean", torch.zeros(5, dtype=torch.float32))
         self.register_buffer("feat_std", torch.ones(5, dtype=torch.float32))
         self.standardize = standardize
+        self.use_speedup = use_speedup
 
     def forward(self, term1, term2, term3, term4, term5, R_pd):
         """Forward pass.
@@ -90,9 +91,6 @@ class SMCostModel(nn.Module):
             features = (features - mean) / std
             term1, term2, term3, term4, term5 = features
 
-        # Calculate speedup
-        speedup = self.alpha_1 * R_pd + self.alpha_2 * (R_pd**2) + self.alpha_3
-
         # Calculate weighted features
         weighted_features = (
             self.theta_1 * term1
@@ -101,9 +99,13 @@ class SMCostModel(nn.Module):
             + self.theta_4 * term4
             + self.theta_5 * term5
         )
+        # Calculate speedup (or use constant 1.0 if speedup is disabled)
+        if self.use_speedup:
+            speedup = self.alpha_1 * R_pd + self.alpha_2 * (R_pd**2) + self.alpha_3
+            pred = speedup * weighted_features + self.beta
 
-        # Apply speedup and add bias
-        pred = speedup * weighted_features + self.beta
+        else:
+            pred = weighted_features + self.beta
         return pred
 
     def get_params(self):
@@ -177,6 +179,7 @@ def train_model(
     model: SMCostModel,
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
     standardize: bool = True,
+    use_speedup: bool = True,
 ):
     """Train the performance model using least squares.
 
@@ -196,16 +199,26 @@ def train_model(
         dtype=torch.float32,
     ).to(device)
     train_R_pd = torch.tensor(train_df["R_pd"].values, dtype=torch.float32).to(device)
-    train_targets = torch.tensor(train_df["sm_time"].values, dtype=torch.float32).to(
-        device
-    )
+    # Transform targets to log scale
+    train_targets_raw = torch.tensor(
+        train_df["sm_time"].values, dtype=torch.float32
+    ).to(device)
+    train_targets = torch.log(
+        train_targets_raw + 1e-10
+    )  # Add small epsilon to avoid log(0)
 
     val_features = torch.tensor(
         val_df[["term1", "term2", "term3", "term4", "term5"]].values,
         dtype=torch.float32,
     ).to(device)
     val_R_pd = torch.tensor(val_df["R_pd"].values, dtype=torch.float32).to(device)
-    val_targets = torch.tensor(val_df["sm_time"].values, dtype=torch.float32).to(device)
+    # Transform targets to log scale
+    val_targets_raw = torch.tensor(val_df["sm_time"].values, dtype=torch.float32).to(
+        device
+    )
+    val_targets = torch.log(
+        val_targets_raw + 1e-10
+    )  # Add small epsilon to avoid log(0)
 
     # Feature standardization
     if standardize:
@@ -265,75 +278,82 @@ def train_model(
         model.theta_5.copy_(w_base[4].to(torch.float32).unsqueeze(0))
         model.beta.copy_(w_base[5].to(torch.float32))
 
-    # Step 2: Solve for α's using fixed θ's
-    # T = (α₁*R + α₂*R² + α₃) * (θ₁*x₁ + θ₂*x₂ + θ₃*x₃ + θ₄*x₄ + θ₅*x₅) + β
-    # Rearranging: T - β = (α₁*R + α₂*R² + α₃) * weighted_features
-    # Let w = θ₁*x₁ + θ₂*x₂ + θ₃*x₃ + θ₄*x₄ + θ₅*x₅
-    # Then: (T - β) / w = α₁*R + α₂*R² + α₃ (if w != 0)
+    # Step 2: Solve for α's using fixed θ's (only if speedup is enabled)
+    if use_speedup:
+        # T = (α₁*R + α₂*R² + α₃) * (θ₁*x₁ + θ₂*x₂ + θ₃*x₃ + θ₄*x₄ + θ₅*x₅) + β
+        # Rearranging: T - β = (α₁*R + α₂*R² + α₃) * weighted_features
+        # Let w = θ₁*x₁ + θ₂*x₂ + θ₃*x₃ + θ₄*x₄ + θ₅*x₅
+        # Then: (T - β) / w = α₁*R + α₂*R² + α₃ (if w != 0)
 
-    theta_1 = model.theta_1.to(torch.float64)
-    theta_2 = model.theta_2.to(torch.float64)
-    theta_3 = model.theta_3.to(torch.float64)
-    theta_4 = model.theta_4.to(torch.float64)
-    theta_5 = model.theta_5.to(torch.float64)
-    beta = model.beta.to(torch.float64)
+        theta_1 = model.theta_1.to(torch.float64)
+        theta_2 = model.theta_2.to(torch.float64)
+        theta_3 = model.theta_3.to(torch.float64)
+        theta_4 = model.theta_4.to(torch.float64)
+        theta_5 = model.theta_5.to(torch.float64)
+        beta = model.beta.to(torch.float64)
 
-    if standardize:
-        feat_mean_f64 = model.feat_mean.to(device).to(torch.float64)
-        feat_std_f64 = model.feat_std.to(device).to(torch.float64)
-        train_features_std = (
-            train_features_raw.to(torch.float64) - feat_mean_f64
-        ) / feat_std_f64
+        if standardize:
+            feat_mean_f64 = model.feat_mean.to(device).to(torch.float64)
+            feat_std_f64 = model.feat_std.to(device).to(torch.float64)
+            train_features_std = (
+                train_features_raw.to(torch.float64) - feat_mean_f64
+            ) / feat_std_f64
+        else:
+            train_features_std = train_features_raw.to(torch.float64)
+
+        term1_n, term2_n, term3_n, term4_n, term5_n = train_features_std.T
+        R = train_R_pd.to(torch.float64)
+        y = train_targets.to(torch.float64)
+
+        # Compute weighted features
+        w = (
+            theta_1 * term1_n
+            + theta_2 * term2_n
+            + theta_3 * term3_n
+            + theta_4 * term4_n
+            + theta_5 * term5_n
+        )
+
+        # Avoid division by zero
+        w_safe = torch.where(torch.abs(w) < 1e-10, torch.ones_like(w), w)
+
+        # Solve for α's: (T - β) / w = α₁*R + α₂*R² + α₃
+        target = (y - beta) / w_safe
+        X_alpha = torch.stack([R, R**2, torch.ones_like(R)], dim=1)  # [N, 3]
+
+        solution_alpha = torch.linalg.lstsq(X_alpha, target.unsqueeze(1))
+        alpha = solution_alpha.solution.squeeze(1)  # [3]
+
+        with torch.no_grad():
+            model.alpha_1.copy_(alpha[0].to(torch.float32))
+            model.alpha_2.copy_(alpha[1].to(torch.float32))
+            model.alpha_3.copy_(alpha[2].to(torch.float32))
     else:
-        train_features_std = train_features_raw.to(torch.float64)
-
-    term1_n, term2_n, term3_n, term4_n, term5_n = train_features_std.T
-    R = train_R_pd.to(torch.float64)
-    y = train_targets.to(torch.float64)
-
-    # Compute weighted features
-    w = (
-        theta_1 * term1_n
-        + theta_2 * term2_n
-        + theta_3 * term3_n
-        + theta_4 * term4_n
-        + theta_5 * term5_n
-    )
-
-    # Avoid division by zero
-    w_safe = torch.where(torch.abs(w) < 1e-10, torch.ones_like(w), w)
-
-    # Solve for α's: (T - β) / w = α₁*R + α₂*R² + α₃
-    target = (y - beta) / w_safe
-    X_alpha = torch.stack([R, R**2, torch.ones_like(R)], dim=1)  # [N, 3]
-
-    solution_alpha = torch.linalg.lstsq(X_alpha, target.unsqueeze(1))
-    alpha = solution_alpha.solution.squeeze(1)  # [3]
-
-    with torch.no_grad():
-        model.alpha_1.copy_(alpha[0].to(torch.float32))
-        model.alpha_2.copy_(alpha[1].to(torch.float32))
-        model.alpha_3.copy_(alpha[2].to(torch.float32))
+        # If speedup is disabled, set alpha parameters so speedup = 1.0
+        with torch.no_grad():
+            model.alpha_1.copy_(torch.tensor(0.0, dtype=torch.float32))
+            model.alpha_2.copy_(torch.tensor(0.0, dtype=torch.float32))
+            model.alpha_3.copy_(torch.tensor(1.0, dtype=torch.float32))
 
     # Compute training and validation losses
     model.eval()
     with torch.no_grad():
-        # Training loss
+        # Training loss (on log scale)
         if standardize:
             term1_t, term2_t, term3_t, term4_t, term5_t = train_features.T
         else:
             term1_t, term2_t, term3_t, term4_t, term5_t = train_features_raw.T
-        pred_train = model(term1_t, term2_t, term3_t, term4_t, term5_t, train_R_pd)
-        train_mse = torch.mean((pred_train - train_targets) ** 2).item()
+        pred_train_log = model(term1_t, term2_t, term3_t, term4_t, term5_t, train_R_pd)
+        train_mse = torch.mean((pred_train_log - train_targets) ** 2).item()
 
-        # Validation loss
+        # Validation loss (on log scale)
         if standardize:
             val_features_std = (val_features - feat_mean) / feat_std
             term1_v, term2_v, term3_v, term4_v, term5_v = val_features_std.T
         else:
             term1_v, term2_v, term3_v, term4_v, term5_v = val_features.T
-        pred_val = model(term1_v, term2_v, term3_v, term4_v, term5_v, val_R_pd)
-        val_mse = torch.mean((pred_val - val_targets) ** 2).item()
+        pred_val_log = model(term1_v, term2_v, term3_v, term4_v, term5_v, val_R_pd)
+        val_mse = torch.mean((pred_val_log - val_targets) ** 2).item()
 
     history = {
         "train_loss": [train_mse],
@@ -369,7 +389,9 @@ def evaluate_model(model: nn.Module, df: pd.DataFrame, device: str = "cpu"):
 
     with torch.no_grad():
         term1, term2, term3, term4, term5 = features.T
-        pred = model(term1, term2, term3, term4, term5, R_pd).cpu().numpy()
+        # Model predicts in log scale, so exponentiate to get back to original scale
+        pred_log = model(term1, term2, term3, term4, term5, R_pd)
+        pred = torch.exp(pred_log).cpu().numpy()
         targets_np = targets.cpu().numpy()
 
     mse = np.mean((pred - targets_np) ** 2)
@@ -447,11 +469,17 @@ def main(args):
     print(f"Val samples: {len(val_df)}")
 
     # Create model
-    model = SMCostModel(standardize=args.standardize).to(device)
+    model = SMCostModel(standardize=args.standardize, use_speedup=args.speedup).to(
+        device
+    )
 
     # Train model
     print("\n" + "=" * 80)
     print("Training model (least squares)...")
+    if args.speedup:
+        print("Speedup term: ENABLED")
+    else:
+        print("Speedup term: DISABLED")
     print("=" * 80)
     model, history = train_model(
         train_df,
@@ -459,6 +487,7 @@ def main(args):
         model,
         device=device,
         standardize=args.standardize,
+        use_speedup=args.speedup,
     )
 
     # Evaluate
@@ -569,6 +598,7 @@ def main(args):
                 "history": history,
                 "metrics": metrics,
                 "standardize": args.standardize,
+                "use_speedup": args.speedup,
             },
             checkpoint_path,
         )
@@ -610,6 +640,11 @@ if __name__ == "__main__":
         "--save-model",
         action="store_true",
         help="Save model checkpoint",
+    )
+    parser.add_argument(
+        "--speedup",
+        action="store_true",
+        help="Enable speedup term in the model (default: disabled)",
     )
     args = parser.parse_args()
     main(args)
