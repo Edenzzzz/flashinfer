@@ -985,7 +985,7 @@ class BatchPODWithPagedKVCacheWrapper:
         v_scale: Optional[float] = None,
         use_fp16_qk_reduction: bool = False,
         enable_pdl: Optional[bool] = None,
-        join_outputs: bool = True,
+        join_outputs: bool = False,
         *args,
     ) -> Union[
         Tuple[torch.Tensor, torch.Tensor],
