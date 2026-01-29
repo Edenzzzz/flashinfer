@@ -986,6 +986,8 @@ class BatchPODWithPagedKVCacheWrapper:
         use_fp16_qk_reduction: bool = False,
         enable_pdl: Optional[bool] = None,
         join_outputs: bool = False,
+        debug: bool = False,
+        load_debug_args: bool = False,
         *args,
     ) -> Union[
         Tuple[torch.Tensor, torch.Tensor],
@@ -1172,6 +1174,11 @@ class BatchPODWithPagedKVCacheWrapper:
             enable_pdl,
         )
 
+        if debug:
+            torch.save(args, "args.pt")
+            torch.cuda.synchronize()
+        if load_debug_args:
+            args = torch.load("args.pt", weights_only=False)
         module_getter.run_tensor(*args)
 
         if v_scale is not None:

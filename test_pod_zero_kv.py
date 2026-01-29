@@ -120,6 +120,7 @@ def test_batch_pod_skips_zero_kv_len_queries():
         causal_p=True,
         join_outputs=False,
         return_lse=True,
+        load_debug_args=True,
     )
     o_p, o_d = o
     o = torch.cat([o_p, o_d], dim=0)
