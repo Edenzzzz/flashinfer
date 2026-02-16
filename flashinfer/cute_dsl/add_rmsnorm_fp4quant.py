@@ -38,6 +38,7 @@ import torch
 from cutlass import Float32, Int32, Int64, Uint32, Uint8
 
 from ..api_logging import flashinfer_api
+from .utils import griddepcontrol_launch_dependents, griddepcontrol_wait
 from .fp4_common import (
     # Constants
     FLOAT4_E2M1_MAX,
@@ -319,6 +320,7 @@ class AddRMSNormFP4QuantKernel:
             else None,
             smem=self._smem_size_in_bytes(),
             stream=stream,
+            use_pdl=True,
         )
 
     @cute.kernel
@@ -480,7 +482,7 @@ class AddRMSNormFP4QuantKernel:
         tXpX = predicate_k(tXcX, limit=H)
         row_coord = tXcX[(0, 0), 0, 0]
         row_in_bounds = row_coord[0] < M
-
+        griddepcontrol_wait()
         # Phase 1: Async copy
         if row_in_bounds:
             cute.copy(copy_atom_load_async, tXgX, tXsX, pred=tXpX)
@@ -872,6 +874,8 @@ class AddRMSNormFP4QuantKernel:
                             fp4_ptr_1 = get_ptr_as_int64(mY, fp4_offset + Int32(8))
                             st_global_u64(fp4_ptr_0, packed64_c0)
                             st_global_u64(fp4_ptr_1, packed64_c1)
+
+        griddepcontrol_launch_dependents()
 
 
 # =============================================================================

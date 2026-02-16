@@ -32,6 +32,7 @@ import torch
 from cutlass import Float32, Int32, Uint8
 
 from ..api_logging import flashinfer_api
+from .utils import griddepcontrol_launch_dependents, griddepcontrol_wait
 from .fp4_common import (
     # Constants
     FLOAT4_E2M1_MAX,
@@ -296,6 +297,7 @@ class RMSNormFP4QuantKernel:
             else None,
             smem=self._smem_size_in_bytes(),
             stream=stream,
+            use_pdl=True,
         )
 
     @cute.kernel
@@ -428,7 +430,7 @@ class RMSNormFP4QuantKernel:
 
         row_coord = tXcX[(0, 0), 0, 0]
         row_in_bounds = row_coord[0] < M
-
+        griddepcontrol_wait()
         # ==================================================================
         # Phase 1: Async copy global → shared (for sum-of-squares)
         # ==================================================================
@@ -640,6 +642,8 @@ class RMSNormFP4QuantKernel:
                             mY, actual_row_idx * (H // 2) + out_offset
                         )
                         st_global_u64(out_ptr, packed64_c1)
+
+        griddepcontrol_launch_dependents()
 
 
 # =============================================================================

@@ -38,11 +38,13 @@ import cutlass.utils.blockscaled_layout as blockscaled_utils
 from cutlass._mlir.dialects import math
 from cutlass.cute.nvgpu import cpasync, tcgen05
 
+from flashinfer.cute_dsl.utils import (
+    griddepcontrol_launch_dependents,
+    griddepcontrol_wait,
+)
 from .utils import (
     TRTLLM_ENABLE_PDL,
     fmin,
-    griddepcontrol_launch_dependents,
-    griddepcontrol_wait,
     is_power_of_2,
     silu_f32,
 )

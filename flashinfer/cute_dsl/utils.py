@@ -23,7 +23,9 @@ import cutlass
 import cutlass._mlir.dialects.cute as _cute_ir
 import torch
 from cutlass._mlir import ir
+from cutlass._mlir.dialects import llvm
 from cutlass.cute.typing import AddressSpace, Numeric, Pointer, Type
+from cutlass.cutlass_dsl import dsl_user_op
 
 
 def ceil_div(a: int, b: int) -> int:
@@ -394,3 +396,46 @@ def get_mma_sf_shape(
     m_tiles = ceil_div(m, 128)
     k_tiles = ceil_div(sf_k, 4)
     return (32, 4, m_tiles, 4, k_tiles, num_groups)
+
+
+# -----------------------------------------------------------------------------
+# Grid dependency control (PDL) for pipeline overlap
+# -----------------------------------------------------------------------------
+
+
+@dsl_user_op
+def griddepcontrol_wait(*, loc=None, ip=None) -> None:
+    """
+    Wait for the previous kernel's grid to finish (all blocks finished and
+    memory flushed). Instructions after this are not issued until the previous
+    grid has finished.
+    """
+    llvm.inline_asm(
+        res=None,
+        operands_=[],
+        asm_string="griddepcontrol.wait;",
+        constraints="",
+        has_side_effects=True,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+
+
+@dsl_user_op
+def griddepcontrol_launch_dependents(*, loc=None, ip=None) -> None:
+    """
+    Hint that dependent grids may launch earlier. Affects performance only:
+    launching too early can compete with the current kernel; too late adds
+    latency.
+    """
+    llvm.inline_asm(
+        res=None,
+        operands_=[],
+        asm_string="griddepcontrol.launch_dependents;",
+        constraints="",
+        has_side_effects=True,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )

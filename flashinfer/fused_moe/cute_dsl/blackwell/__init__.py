@@ -35,7 +35,5 @@ from .blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion import (
 )
 from .utils import (
     TRTLLM_ENABLE_PDL,
-    griddepcontrol_launch_dependents,
-    griddepcontrol_wait,
     is_power_of_2,
 )
