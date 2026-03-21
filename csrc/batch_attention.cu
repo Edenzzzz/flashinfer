@@ -175,10 +175,27 @@ void BatchPagedAttentionRun(TensorView float_workspace_buffer, TensorView int_wo
           params[i].sm_scale = sm_scale;
           params[i].v_scale = v_scale;
           params[i].logits_soft_cap = logits_soft_cap;
+
+          // LPT runtime tile fetching
+          if (plan_info.flipped_schedule) {
+            params[i].tile_counter =
+                GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.tile_counter_offset) + i;
+            params[i].total_num_works = plan_info.total_num_works[i];
+          } else {
+            params[i].tile_counter = nullptr;
+            params[i].total_num_works = 0;
+          }
           // NOTE(Wenxuan) directly using the additional_params_decl from generate_additional_params
           // will be problematic because of the params[i]
           ADDITIONAL_PARAMS_SETTER
           PROFILER_PARAMS_SETTER
+        }
+
+        // Reset tile counters before launch (for LPT runtime fetching)
+        if (plan_info.flipped_schedule) {
+          IdType* tile_counters =
+              GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.tile_counter_offset);
+          cudaMemsetAsync(tile_counters, 0, sizeof(IdType) * 2, stream);
         }
 
         cudaError_t status =

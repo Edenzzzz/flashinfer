@@ -1040,9 +1040,13 @@ struct HolisticPlanInfo {
   int64_t merge_o_indices_offset;
   int64_t num_qo_len_offset;
   bool flipped_schedule;
+  // LPT runtime scheduling: total number of work items per task (for atomic counter)
+  int64_t total_num_works[NUM_TASKS];
+  // Offset into int_buffer for the global tile counter (one int per task)
+  int64_t tile_counter_offset;
 
   static constexpr uint32_t NUM_TASK_ARGS = 10;
-  static constexpr uint32_t NUM_SHARED_ARGS = 9;
+  static constexpr uint32_t NUM_SHARED_ARGS = 9 + NUM_TASKS + 1;  // +total_num_works[NUM_TASKS] + tile_counter_offset
 
   std::vector<int64_t> ToVector() const {
     std::vector<int64_t> vec;
@@ -1067,6 +1071,10 @@ struct HolisticPlanInfo {
     vec.push_back(merge_o_indices_offset);
     vec.push_back(num_qo_len_offset);
     vec.push_back(flipped_schedule);
+    for (uint32_t i = 0; i < NUM_TASKS; ++i) {
+      vec.push_back(total_num_works[i]);
+    }
+    vec.push_back(tile_counter_offset);
     return vec;
   }
 
@@ -1091,13 +1099,18 @@ struct HolisticPlanInfo {
       tasks[i].kv_head_idx_offset = vec[2 + i * NUM_TASK_ARGS + 8];
       tasks[i].work_indptr_offset = vec[2 + i * NUM_TASK_ARGS + 9];
     }
-    len_kv_chunk_offset = vec[2 + NUM_TASKS * NUM_TASK_ARGS];
-    partial_o_offset = vec[3 + NUM_TASKS * NUM_TASK_ARGS];
-    partial_lse_offset = vec[4 + NUM_TASKS * NUM_TASK_ARGS];
-    merge_indptr_offset = vec[5 + NUM_TASKS * NUM_TASK_ARGS];
-    merge_o_indices_offset = vec[6 + NUM_TASKS * NUM_TASK_ARGS];
-    num_qo_len_offset = vec[7 + NUM_TASKS * NUM_TASK_ARGS];
-    flipped_schedule = vec[8 + NUM_TASKS * NUM_TASK_ARGS];
+    uint32_t base = 2 + NUM_TASKS * NUM_TASK_ARGS;
+    len_kv_chunk_offset = vec[base + 0];
+    partial_o_offset = vec[base + 1];
+    partial_lse_offset = vec[base + 2];
+    merge_indptr_offset = vec[base + 3];
+    merge_o_indices_offset = vec[base + 4];
+    num_qo_len_offset = vec[base + 5];
+    flipped_schedule = vec[base + 6];
+    for (uint32_t i = 0; i < NUM_TASKS; ++i) {
+      total_num_works[i] = vec[base + 7 + i];
+    }
+    tile_counter_offset = vec[base + 7 + NUM_TASKS];
   }
 };
 
@@ -1285,6 +1298,7 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
       work_indptr_vec[i + 1] = work_indptr_vec[i] + cluster_q_indptr[i].size();
     }
     int total_num_works = work_indptr_vec.back();
+    plan_info.total_num_works[task] = total_num_works;
     if (total_num_works > max_total_num_works) {
       std::ostringstream err_msg;
       err_msg << "total_num_works (#q tiles * #kv tiles) " << total_num_works
@@ -1366,6 +1380,12 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
   CopyToPageLockedBuffer(page_locked_int_buffer, plan_info.merge_o_indices_offset, merge_o_indices);
   CopyToPageLockedBuffer(page_locked_int_buffer, plan_info.num_qo_len_offset,
                          num_expand_qo_len_vec);
+
+  // Allocate tile counters for LPT runtime scheduling (one int per task, zero-initialized)
+  plan_info.tile_counter_offset =
+      int_allocator.aligned_alloc_offset(sizeof(IdType) * NUM_TASKS, 16, "tile_counter");
+  std::vector<IdType> tile_counter_init(NUM_TASKS, 0);
+  CopyToPageLockedBuffer(page_locked_int_buffer, plan_info.tile_counter_offset, tile_counter_init);
 
   size_t num_bytes_to_copy = int_allocator.num_allocated_bytes();
   FLASHINFER_CUDA_CALL(cudaMemcpyAsync(int_buffer, page_locked_int_buffer, num_bytes_to_copy,

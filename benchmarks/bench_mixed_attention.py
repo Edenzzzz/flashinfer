@@ -104,6 +104,7 @@ def run_bench(
     o_persistent, _ = wrapper_persistent.run(q, kv_data)
     measurements_persistent = bench_gpu_time(lambda: wrapper_persistent.run(q, kv_data))
     ms_persistent = np.mean(measurements_persistent)
+    torch.testing.assert_close(o_persistent, o, rtol=4e-3, atol=4e-3)
 
     # Batched POD Attention
     q_d = q[: d_q_indptr[-1]]
@@ -138,18 +139,19 @@ def run_bench(
         q_data_type=torch.bfloat16,
         kv_data_type=torch.bfloat16,
     )
-    o_batch_pod = wrapper_pod.run(
+    (o_p_batch, o_d_batch), _ = wrapper_pod.run(
         q_p,
         kv_data,
         q_d,
         kv_data,
         causal_p=causal,
+        return_lse=True,
     )
-    # o_batch_pod = torch.cat([o_d_batch, o_p_batch], dim=0)
+    o_batch_pod = torch.cat([o_d_batch, o_p_batch], dim=0)
 
-    # Verify output matches
+    # Verify output matches (reference o is decode-first, then prefill)
     torch.testing.assert_close(
-        o_batch_pod, o, rtol=4e-3, atol=4e-3, msg="Batch POD-Attention decode mismatch!"
+        o_batch_pod, o, rtol=4e-3, atol=4e-3
     )
     measurements = bench_gpu_time(
         lambda: wrapper_pod.run(

@@ -779,6 +779,13 @@ class BatchPODWithPagedKVCacheWrapper:
         rope_scale: Optional[float] = None,
         rope_theta: Optional[float] = None,
         non_blocking: bool = True,
+        # Optional CPU tensors to skip GPU->CPU sync in plan()
+        qo_indptr_host_p: Optional[torch.Tensor] = None,
+        kv_indptr_host_p: Optional[torch.Tensor] = None,
+        last_page_len_host_p: Optional[torch.Tensor] = None,
+        qo_indptr_host_d: Optional[torch.Tensor] = None,
+        kv_indptr_host_d: Optional[torch.Tensor] = None,
+        last_page_len_host_d: Optional[torch.Tensor] = None,
     ) -> None:
         r"""Plan POD's batch prefill and decode for given problem specification.
 
@@ -846,18 +853,21 @@ class BatchPODWithPagedKVCacheWrapper:
         # Setup prefill params
         batch_size_p = len(last_page_len_p)
         self.batch_size_p = batch_size_p
-        qo_indptr_host_p = qo_indptr_p.to("cpu")
+        if qo_indptr_host_p is None:
+            qo_indptr_host_p = qo_indptr_p.to("cpu")
         total_num_rows_p = int(qo_indptr_host_p[-1])
         self._kv_indptr_buf_p = kv_indptr_p.to(self.device, non_blocking=non_blocking)
         self._kv_indices_buf_p = kv_indices_p.to(self.device, non_blocking=non_blocking)
         self._kv_last_page_len_buf_p = last_page_len_p.to(
             self.device, non_blocking=non_blocking
         )
-        self._qo_indptr_buf_p = qo_indptr_host_p.to(
+        self._qo_indptr_buf_p = qo_indptr_p.to(
             self.device, non_blocking=non_blocking
         )
-        kv_indptr_host_p = kv_indptr_p.to("cpu")
-        last_page_len_host_p = last_page_len_p.to("cpu")
+        if kv_indptr_host_p is None:
+            kv_indptr_host_p = kv_indptr_p.to("cpu")
+        if last_page_len_host_p is None:
+            last_page_len_host_p = last_page_len_p.to("cpu")
         kv_lens_arr_host_p = get_seq_lens(
             kv_indptr_host_p, last_page_len_host_p, page_size
         )
@@ -894,18 +904,21 @@ class BatchPODWithPagedKVCacheWrapper:
         # Setup decode params
         batch_size_d = len(last_page_len_d)
         self.batch_size_d = batch_size_d
-        qo_indptr_host_d = qo_indptr_d.to("cpu")
+        if qo_indptr_host_d is None:
+            qo_indptr_host_d = qo_indptr_d.to("cpu")
         total_num_rows_d = int(qo_indptr_host_d[-1])
         self._kv_indptr_buf_d = kv_indptr_d.to(self.device, non_blocking=non_blocking)
         self._kv_indices_buf_d = kv_indices_d.to(self.device, non_blocking=non_blocking)
         self._kv_last_page_len_buf_d = last_page_len_d.to(
             self.device, non_blocking=non_blocking
         )
-        self._qo_indptr_buf_d = qo_indptr_host_d.to(
+        self._qo_indptr_buf_d = qo_indptr_d.to(
             self.device, non_blocking=non_blocking
         )
-        kv_indptr_host_d = kv_indptr_d.to("cpu")
-        last_page_len_host_d = last_page_len_d.to("cpu")
+        if kv_indptr_host_d is None:
+            kv_indptr_host_d = kv_indptr_d.to("cpu")
+        if last_page_len_host_d is None:
+            last_page_len_host_d = last_page_len_d.to("cpu")
         kv_lens_arr_host_d = get_seq_lens(
             kv_indptr_host_d, last_page_len_host_d, page_size
         )
@@ -1044,25 +1057,25 @@ class BatchPODWithPagedKVCacheWrapper:
         lse_d = None
         lse_p = None
         if join_outputs:
-            # (TODO Wenxuan) This somehow causes illegal memory access
+            # Allocate contiguous buffer: prefill first, then decode
             out = torch.empty(
-                q_d.shape[0] + q_p.shape[0],
+                q_p.shape[0] + q_d.shape[0],
                 q_p.shape[1],
                 q_p.shape[2],
                 device=q_p.device,
                 dtype=q_p.dtype,
             )
-            out_d = out[: q_d.shape[0]]
-            out_p = out[q_d.shape[0] :]
+            out_p = out[: q_p.shape[0]]
+            out_d = out[q_p.shape[0] :]
             if return_lse:
                 lse = torch.empty(
-                    q_d.shape[0] + q_p.shape[0],
+                    q_p.shape[0] + q_d.shape[0],
                     q_p.shape[1],
                     device=q_p.device,
                     dtype=torch.float32,
                 )
-                lse_d = lse[: q_d.shape[0]]
-                lse_p = lse[q_d.shape[0] :]
+                lse_p = lse[: q_p.shape[0]]
+                lse_d = lse[q_p.shape[0] :]
         else:
             out_p = torch.empty_like(q_p)
             out_d = torch.empty_like(q_d)

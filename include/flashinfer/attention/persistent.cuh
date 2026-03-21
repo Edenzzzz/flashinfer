@@ -257,9 +257,32 @@ struct BlockBatchPagedAttentionPersistent {
                  lane_idx % KTraits::KV_THR_LAYOUT_COL);
     size_t thr_local_kv_offset[NUM_MMA_KV * KTraits::KV_THR_LAYOUT_COL / 2 / KTraits::NUM_WARPS_Q];
 
+    // LPT runtime tile fetching: use atomic counter if tile_counter is set,
+    // otherwise fall back to static work_indptr assignment
+    const bool use_lpt = (params.tile_counter != nullptr);
+    IdType work_idx_start = use_lpt ? 0 : work_indptr[blockIdx.y];
+    IdType work_idx_end = use_lpt ? params.total_num_works : work_indptr[blockIdx.y + 1];
+
 #pragma unroll 1
-    for (IdType work_idx = work_indptr[blockIdx.y]; work_idx < work_indptr[blockIdx.y + 1];
-         ++work_idx) {
+    for (IdType work_idx = work_idx_start; ; ) {
+      if (use_lpt) {
+        // Atomically grab the next tile (LPT order: tiles sorted by cost descending)
+        __syncthreads();
+        if (threadIdx.x == 0) {
+          work_idx = atomicAdd(params.tile_counter, 1);
+        }
+        // Broadcast work_idx from thread 0 to all threads in the block
+        work_idx = __shfl_sync(0xffffffff, work_idx, 0);
+        // For multi-warp blocks, use shared memory to broadcast across warps
+        if (warp_idx == 0 && lane_idx == 0) {
+          reinterpret_cast<volatile IdType*>(smem_storage)[0] = work_idx;
+        }
+        __syncthreads();
+        work_idx = reinterpret_cast<volatile IdType*>(smem_storage)[0];
+        if (work_idx >= work_idx_end) break;
+      } else {
+        if (work_idx >= work_idx_end) break;
+      }
       // profile log
       if constexpr (CTA_TILE_Q > 64) {
         PROFILER_EVENT_START(profiler_closure, PersistentProfileEventType::kRunner1);
@@ -449,6 +472,11 @@ struct BlockBatchPagedAttentionPersistent {
         PROFILER_EVENT_END(profiler_closure, PersistentProfileEventType::kRunner1);
       } else {
         PROFILER_EVENT_END(profiler_closure, PersistentProfileEventType::kRunner2);
+      }
+
+      // Advance to next work item (for static path; LPT path uses atomic at loop top)
+      if (!use_lpt) {
+        ++work_idx;
       }
     }
   }
