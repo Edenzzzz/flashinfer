@@ -1048,7 +1048,8 @@ struct HolisticPlanInfo {
 
   // Dynamic scheduler (FA3-style): per-sequence metadata offsets per task
   struct {
-    int64_t qo_indptr_offset;     // [num_seqs+1] cumulative Q token counts
+    int64_t qo_indptr_offset;     // [num_seqs] global Q buffer offset per sequence
+    int64_t qo_len_offset;        // [num_seqs] Q length per sequence
     int64_t kv_indptr_offset;     // [num_seqs] page table offset per sequence
     int64_t kv_len_offset;        // [num_seqs] KV length per sequence
     int64_t num_m_blocks_offset;  // [num_seqs] Q tiles per sequence
@@ -1059,7 +1060,7 @@ struct HolisticPlanInfo {
   } dyn[NUM_TASKS];
 
   static constexpr uint32_t NUM_TASK_ARGS = 10;
-  static constexpr uint32_t NUM_DYN_ARGS = 8;  // per-task dynamic scheduler args
+  static constexpr uint32_t NUM_DYN_ARGS = 9;  // per-task dynamic scheduler args
   static constexpr uint32_t NUM_SHARED_ARGS = 9 + NUM_TASKS + 1 + NUM_TASKS * NUM_DYN_ARGS;
 
   std::vector<int64_t> ToVector() const {
@@ -1091,6 +1092,7 @@ struct HolisticPlanInfo {
     vec.push_back(tile_counter_offset);
     for (uint32_t i = 0; i < NUM_TASKS; ++i) {
       vec.push_back(dyn[i].qo_indptr_offset);
+      vec.push_back(dyn[i].qo_len_offset);
       vec.push_back(dyn[i].kv_indptr_offset);
       vec.push_back(dyn[i].kv_len_offset);
       vec.push_back(dyn[i].num_m_blocks_offset);
@@ -1138,13 +1140,14 @@ struct HolisticPlanInfo {
     uint32_t dyn_base = base + 7 + NUM_TASKS + 1;
     for (uint32_t i = 0; i < NUM_TASKS; ++i) {
       dyn[i].qo_indptr_offset = vec[dyn_base + i * NUM_DYN_ARGS + 0];
-      dyn[i].kv_indptr_offset = vec[dyn_base + i * NUM_DYN_ARGS + 1];
-      dyn[i].kv_len_offset = vec[dyn_base + i * NUM_DYN_ARGS + 2];
-      dyn[i].num_m_blocks_offset = vec[dyn_base + i * NUM_DYN_ARGS + 3];
-      dyn[i].nheads_in_l2_offset = vec[dyn_base + i * NUM_DYN_ARGS + 4];
-      dyn[i].num_seqs = vec[dyn_base + i * NUM_DYN_ARGS + 5];
-      dyn[i].total_tiles = vec[dyn_base + i * NUM_DYN_ARGS + 6];
-      dyn[i].len_kv_chunk = vec[dyn_base + i * NUM_DYN_ARGS + 7];
+      dyn[i].qo_len_offset = vec[dyn_base + i * NUM_DYN_ARGS + 1];
+      dyn[i].kv_indptr_offset = vec[dyn_base + i * NUM_DYN_ARGS + 2];
+      dyn[i].kv_len_offset = vec[dyn_base + i * NUM_DYN_ARGS + 3];
+      dyn[i].num_m_blocks_offset = vec[dyn_base + i * NUM_DYN_ARGS + 4];
+      dyn[i].nheads_in_l2_offset = vec[dyn_base + i * NUM_DYN_ARGS + 5];
+      dyn[i].num_seqs = vec[dyn_base + i * NUM_DYN_ARGS + 6];
+      dyn[i].total_tiles = vec[dyn_base + i * NUM_DYN_ARGS + 7];
+      dyn[i].len_kv_chunk = vec[dyn_base + i * NUM_DYN_ARGS + 8];
     }
   }
 };
@@ -1230,7 +1233,8 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
       auto& seqs = idx_qo_kv_len_vec[task];
       int num_seqs = seqs.size();
 
-      std::vector<IdType> dyn_qo_indptr(num_seqs + 1, 0);
+      std::vector<IdType> dyn_qo_indptr_vec(num_seqs, 0);  // global Q buffer offset per seq
+      std::vector<IdType> dyn_qo_len_vec(num_seqs, 0);
       std::vector<IdType> dyn_kv_indptr_vec(num_seqs, 0);
       std::vector<IdType> dyn_kv_len_vec(num_seqs, 0);
       std::vector<IdType> dyn_num_m_blocks_vec(num_seqs, 0);
@@ -1242,7 +1246,8 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
         int packed_qo_len = qo_len * gqa_group_size;
         int num_m_blocks = ceil_div(packed_qo_len, tile_q);
 
-        dyn_qo_indptr[s] = qo_indptr_h[seq_idx];
+        dyn_qo_indptr_vec[s] = qo_indptr_h[seq_idx];
+        dyn_qo_len_vec[s] = qo_len;
         dyn_kv_indptr_vec[s] = kv_indptr_h[seq_idx];
         dyn_kv_len_vec[s] = kv_len;
         dyn_num_m_blocks_vec[s] = num_m_blocks;
@@ -1263,9 +1268,6 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
 
         total_tiles += num_m_blocks * num_kv_heads;
       }
-      dyn_qo_indptr[num_seqs] = (num_seqs > 0) ?
-          qo_indptr_h[std::get<0>(seqs[num_seqs - 1]) + 1] : 0;
-
       plan_info.dyn[task].num_seqs = num_seqs;
       plan_info.dyn[task].total_tiles = total_tiles;
       // KV chunk limit (same formula as static scheduler)
@@ -1276,19 +1278,24 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
       plan_info.dyn[task].len_kv_chunk = kv_len_limit;
 
       // Allocate and copy per-sequence metadata to device
+      int alloc_seqs = std::max(num_seqs, 1);
       plan_info.dyn[task].qo_indptr_offset =
-          int_allocator.aligned_alloc_offset(sizeof(IdType) * (num_seqs + 1), 16, "dyn_qo_indptr");
+          int_allocator.aligned_alloc_offset(sizeof(IdType) * alloc_seqs, 16, "dyn_qo_indptr");
       plan_info.dyn[task].kv_indptr_offset =
-          int_allocator.aligned_alloc_offset(sizeof(IdType) * std::max(num_seqs, 1), 16, "dyn_kv_indptr");
+          int_allocator.aligned_alloc_offset(sizeof(IdType) * alloc_seqs, 16, "dyn_kv_indptr");
       plan_info.dyn[task].kv_len_offset =
-          int_allocator.aligned_alloc_offset(sizeof(IdType) * std::max(num_seqs, 1), 16, "dyn_kv_len");
+          int_allocator.aligned_alloc_offset(sizeof(IdType) * alloc_seqs, 16, "dyn_kv_len");
       plan_info.dyn[task].num_m_blocks_offset =
-          int_allocator.aligned_alloc_offset(sizeof(IdType) * std::max(num_seqs, 1), 16, "dyn_num_m_blocks");
+          int_allocator.aligned_alloc_offset(sizeof(IdType) * alloc_seqs, 16, "dyn_num_m_blocks");
       plan_info.dyn[task].nheads_in_l2_offset =
-          int_allocator.aligned_alloc_offset(sizeof(IdType) * std::max(num_seqs, 1), 16, "dyn_nheads_in_l2");
+          int_allocator.aligned_alloc_offset(sizeof(IdType) * alloc_seqs, 16, "dyn_nheads_in_l2");
 
-      CopyToPageLockedBuffer(page_locked_int_buffer, plan_info.dyn[task].qo_indptr_offset, dyn_qo_indptr);
+      plan_info.dyn[task].qo_len_offset =
+          int_allocator.aligned_alloc_offset(sizeof(IdType) * alloc_seqs, 16, "dyn_qo_len");
+
       if (num_seqs > 0) {
+        CopyToPageLockedBuffer(page_locked_int_buffer, plan_info.dyn[task].qo_indptr_offset, dyn_qo_indptr_vec);
+        CopyToPageLockedBuffer(page_locked_int_buffer, plan_info.dyn[task].qo_len_offset, dyn_qo_len_vec);
         CopyToPageLockedBuffer(page_locked_int_buffer, plan_info.dyn[task].kv_indptr_offset, dyn_kv_indptr_vec);
         CopyToPageLockedBuffer(page_locked_int_buffer, plan_info.dyn[task].kv_len_offset, dyn_kv_len_vec);
         CopyToPageLockedBuffer(page_locked_int_buffer, plan_info.dyn[task].num_m_blocks_offset, dyn_num_m_blocks_vec);
@@ -1302,6 +1309,7 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
       plan_info.dyn[task].total_tiles = 0;
       plan_info.dyn[task].len_kv_chunk = 0;
       plan_info.dyn[task].qo_indptr_offset = 0;
+      plan_info.dyn[task].qo_len_offset = 0;
       plan_info.dyn[task].kv_indptr_offset = 0;
       plan_info.dyn[task].kv_len_offset = 0;
       plan_info.dyn[task].num_m_blocks_offset = 0;

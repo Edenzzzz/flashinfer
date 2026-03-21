@@ -191,6 +191,8 @@ void BatchPagedAttentionRun(TensorView float_workspace_buffer, TensorView int_wo
             params[i].dyn_num_seqs = plan_info.dyn[i].num_seqs;
             params[i].dyn_qo_indptr =
                 GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.dyn[i].qo_indptr_offset);
+            params[i].dyn_qo_len =
+                GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.dyn[i].qo_len_offset);
             params[i].dyn_kv_indptr =
                 GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.dyn[i].kv_indptr_offset);
             params[i].dyn_kv_len =
@@ -204,6 +206,7 @@ void BatchPagedAttentionRun(TensorView float_workspace_buffer, TensorView int_wo
           } else {
             params[i].dyn_num_seqs = 0;
             params[i].dyn_qo_indptr = nullptr;
+            params[i].dyn_qo_len = nullptr;
             params[i].dyn_kv_indptr = nullptr;
             params[i].dyn_kv_len = nullptr;
             params[i].dyn_num_m_blocks = nullptr;

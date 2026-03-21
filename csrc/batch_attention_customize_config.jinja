@@ -103,7 +103,8 @@ struct PersistentParams {
   // Dynamic scheduler (v3 FA3-style) — per-sequence metadata
   // When dyn_num_seqs > 0, use dynamic tile_idx_to_work_tile() instead of get_block_coord()
   int32_t dyn_num_seqs;            // number of sequences in this queue (0 = disabled)
-  IdType* dyn_qo_indptr;           // [num_seqs+1] cumulative Q token counts
+  IdType* dyn_qo_indptr;           // [num_seqs] global Q buffer offset per sequence
+  IdType* dyn_qo_len;              // [num_seqs] Q length per sequence
   IdType* dyn_kv_indptr;           // [num_seqs] page table offset per sequence
   IdType* dyn_kv_len;              // [num_seqs] KV length per sequence
   IdType* dyn_num_m_blocks;        // [num_seqs] Q tiles per sequence = ceil_div(packed_qo_len, CTA_TILE_Q)

@@ -136,7 +136,7 @@ __device__ __forceinline__ auto tile_idx_to_work_tile(
   block = num_m_blocks - 1 - block;
 
   // --- Step 3: Compute the work coordinates ---
-  int qo_len = params.dyn_qo_indptr[bidb + 1] - params.dyn_qo_indptr[bidb];
+  int qo_len = params.dyn_qo_len[bidb];
   int packed_qo_len = qo_len * (uint32_t)gqa_group_size;
   int packed_qo_start = block * CTA_TILE_Q;
   int kv_len = params.dyn_kv_len[bidb];
@@ -147,7 +147,7 @@ __device__ __forceinline__ auto tile_idx_to_work_tile(
   int partial_o_offset = 0;  // write-through (no KV splitting)
 
   return std::tuple(
-      (IdType)params.dyn_qo_indptr[bidb],   // q_indptr
+      (IdType)params.dyn_qo_indptr[bidb],   // q_indptr (global Q buffer offset)
       (IdType)params.dyn_kv_indptr[bidb],    // kv_indptr
       (IdType)partial_o_offset,              // partial_indptr (0 for non-split)
       (IdType)qo_len,                        // q_len
