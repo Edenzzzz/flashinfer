@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <numeric>
 #include <cstdint>
 #include <sstream>
 #include <vector>
@@ -1168,7 +1169,8 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
       idx_qo_kv_len_vec[1].push_back({i, qo_len, kv_len});
     }
   }
-  if (total_prefill_len * 128 <= total_decode_len && total_prefill_len >= 3072) {
+  // Enable LPT + flipped schedule whenever we have both prefill and decode work
+  if (total_prefill_len > 0 && total_decode_len > 0) {
     plan_info.flipped_schedule = true;
   } else {
     plan_info.flipped_schedule = false;
@@ -1314,6 +1316,34 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
     auto kv_start_vec = flatten(cluster_kv_start, total_num_works);
     auto kv_end_vec = flatten(cluster_kv_end, total_num_works);
     auto kv_head_idx_vec = flatten(cluster_kv_head_idx, total_num_works);
+
+    // LPT sorting: sort tiles by cost descending so atomic fetching gives largest tiles first
+    if (plan_info.flipped_schedule && total_num_works > 0) {
+      // Build sort permutation by cost (descending)
+      std::vector<int> perm(total_num_works);
+      std::iota(perm.begin(), perm.end(), 0);
+      int tile_q = CTA_TILE_Q_SIZES[task] * cluster_size;
+      std::sort(perm.begin(), perm.end(), [&](int a, int b) {
+        float cost_a = cost_function(tile_q, kv_end_vec[a] - kv_start_vec[a]);
+        float cost_b = cost_function(tile_q, kv_end_vec[b] - kv_start_vec[b]);
+        return cost_a > cost_b;  // descending
+      });
+      // Apply permutation to all arrays
+      auto apply_perm = [&](std::vector<IdType>& vec) {
+        std::vector<IdType> tmp(vec.size());
+        for (int i = 0; i < total_num_works; ++i) tmp[i] = vec[perm[i]];
+        vec = std::move(tmp);
+      };
+      apply_perm(q_indptr_vec);
+      apply_perm(kv_indptr_vec);
+      apply_perm(partial_indptr_vec);
+      apply_perm(q_len_vec);
+      apply_perm(kv_len_vec);
+      apply_perm(q_start_vec);
+      apply_perm(kv_start_vec);
+      apply_perm(kv_end_vec);
+      apply_perm(kv_head_idx_vec);
+    }
 
     plan_info.tasks[task].q_indptr_offset =
         int_allocator.aligned_alloc_offset(sizeof(IdType) * max_total_num_works, 16, "q_indptr");
