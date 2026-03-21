@@ -185,6 +185,32 @@ void BatchPagedAttentionRun(TensorView float_workspace_buffer, TensorView int_wo
             params[i].tile_counter = nullptr;
             params[i].total_num_works = 0;
           }
+
+          // Dynamic scheduler (v3 FA3-style)
+          if (plan_info.flipped_schedule && plan_info.dyn[i].num_seqs > 0) {
+            params[i].dyn_num_seqs = plan_info.dyn[i].num_seqs;
+            params[i].dyn_qo_indptr =
+                GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.dyn[i].qo_indptr_offset);
+            params[i].dyn_kv_indptr =
+                GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.dyn[i].kv_indptr_offset);
+            params[i].dyn_kv_len =
+                GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.dyn[i].kv_len_offset);
+            params[i].dyn_num_m_blocks =
+                GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.dyn[i].num_m_blocks_offset);
+            params[i].dyn_nheads_in_l2 =
+                GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.dyn[i].nheads_in_l2_offset);
+            params[i].dyn_total_tiles = plan_info.dyn[i].total_tiles;
+            params[i].dyn_len_kv_chunk = plan_info.dyn[i].len_kv_chunk;
+          } else {
+            params[i].dyn_num_seqs = 0;
+            params[i].dyn_qo_indptr = nullptr;
+            params[i].dyn_kv_indptr = nullptr;
+            params[i].dyn_kv_len = nullptr;
+            params[i].dyn_num_m_blocks = nullptr;
+            params[i].dyn_nheads_in_l2 = nullptr;
+            params[i].dyn_total_tiles = 0;
+            params[i].dyn_len_kv_chunk = 0;
+          }
           // NOTE(Wenxuan) directly using the additional_params_decl from generate_additional_params
           // will be problematic because of the params[i]
           ADDITIONAL_PARAMS_SETTER

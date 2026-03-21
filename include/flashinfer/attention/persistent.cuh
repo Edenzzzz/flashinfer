@@ -38,6 +38,130 @@ __device__ __forceinline__ auto get_block_coord(const Params& params, const uint
                     *params.len_kv_chunk);
 }
 
+/*!
+ * \brief Warp-level inclusive prefix sum using shuffle instructions.
+ * Each lane i holds value[i], returns sum of value[0..i].
+ */
+__device__ __forceinline__ int warp_prefix_sum(int value) {
+  for (int delta = 1; delta < 32; delta <<= 1) {
+    int n = __shfl_up_sync(0xffffffff, value, delta);
+    if ((threadIdx.x % 32) >= delta) value += n;
+  }
+  return value;
+}
+
+/*!
+ * \brief FA3-style dynamic tile scheduler: maps a global tile index to
+ * (seq_idx, kv_head_idx, q_tile_idx) with L2-aware LPT ordering.
+ *
+ * Tile layout: batch (slowest) → head → query block (fastest).
+ * Within each sequence, heads are grouped into L2 sections; within each section,
+ * query blocks iterate first (inner), heads second (outer) for L2 locality.
+ * Query blocks are reversed (LPT) for causal attention load balancing.
+ *
+ * \tparam CTA_TILE_Q The query tile size for this runner
+ * \param params The persistent params containing per-sequence metadata
+ * \param tile_idx The global tile index from atomicAdd
+ * \param prev_bidb The batch index from the previous iteration (for warm start)
+ * \param prev_group_start The group_start_tile from previous iteration
+ *
+ * Returns tuple of (q_indptr, kv_indptr, partial_o_offset, q_len, kv_len,
+ *                    packed_qo_start, kv_start, kv_end, kv_head_idx, len_kv_chunk)
+ * matching get_block_coord() signature, plus updated (bidb, group_start_tile).
+ */
+template <uint32_t CTA_TILE_Q, typename Params, typename IdType>
+__device__ __forceinline__ auto tile_idx_to_work_tile(
+    const Params& params, int tile_idx, int prev_bidb, int prev_group_start) {
+
+  const int lane = threadIdx.x % 32;
+  const uint32_t num_kv_heads = params.num_kv_heads;
+  const uint_fastdiv& gqa_group_size = params.gqa_group_size;
+
+  // --- Step 1: Find which sequence this tile belongs to ---
+  // Each lane holds num_tiles for a different sequence (31 sequences per warp iteration)
+  auto get_num_tiles = [&](int seq_start) -> int {
+    int seq_idx = lane + seq_start;
+    if (seq_idx < params.dyn_num_seqs && lane < 31) {
+      return params.dyn_num_m_blocks[seq_idx];
+    }
+    return 0;
+  };
+
+  int bidb = prev_bidb;
+  int num_tiles = get_num_tiles(bidb);
+  int num_tiles_cumulative = warp_prefix_sum(num_tiles);
+  int tiles_in_group = __shfl_sync(0xffffffff, num_tiles_cumulative, 31);
+  int group_end_tile = prev_group_start + tiles_in_group * num_kv_heads;
+
+  while (group_end_tile <= tile_idx) {
+    bidb += 31;  // advance by warp width - 1
+    if (bidb >= params.dyn_num_seqs) {
+      // Past the end — return sentinel
+      // q_indptr, kv_indptr, partial_o, q_len, kv_len, qo_start, kv_start, kv_end, kv_head, chunk
+      return std::tuple((IdType)0, (IdType)0, (IdType)0, (IdType)0, (IdType)0,
+                        (IdType)0, (IdType)0, (IdType)0, (IdType)0,
+                        params.dyn_len_kv_chunk, bidb, group_end_tile);
+    }
+    num_tiles = get_num_tiles(bidb);
+    num_tiles_cumulative = warp_prefix_sum(num_tiles);
+    tiles_in_group = __shfl_sync(0xffffffff, num_tiles_cumulative, 31);
+    group_end_tile += tiles_in_group * num_kv_heads;
+  }
+  int group_start_tile = group_end_tile - tiles_in_group * num_kv_heads;
+
+  // Find exact sequence within the group
+  int batch_idx_in_group = __popc(__ballot_sync(0xffffffff,
+      group_start_tile + num_tiles_cumulative * num_kv_heads <= tile_idx));
+  bidb += batch_idx_in_group;
+  int num_m_blocks = __shfl_sync(0xffffffff, num_tiles, batch_idx_in_group);
+  group_start_tile += (batch_idx_in_group == 0 ? 0 :
+      __shfl_sync(0xffffffff, num_tiles_cumulative, batch_idx_in_group - 1)) * num_kv_heads;
+
+  // --- Step 2: Map within-sequence tile index to (head, q_block) with L2 awareness ---
+  int mh_block = tile_idx - group_start_tile;
+
+  // L2-aware LPT mapping (no KV splitting)
+  int nheads_in_l2 = params.dyn_nheads_in_l2[bidb];
+  int mh_in_l2 = nheads_in_l2 * num_m_blocks;
+  int section_idx = mh_block / mh_in_l2;
+  int l2_mod = mh_block - section_idx * mh_in_l2;
+  // Handle tail section (fewer heads)
+  int nheads_remainder = num_kv_heads - section_idx * nheads_in_l2;
+  int nheads_in_this_section = nheads_in_l2 <= nheads_remainder ? nheads_in_l2 : nheads_remainder;
+  int block = l2_mod / nheads_in_this_section;
+  int bidh_residual = l2_mod - block * nheads_in_this_section;
+  int kv_head_idx = section_idx * nheads_in_l2 + bidh_residual;
+
+  // LPT: reverse query block order (largest first for causal)
+  block = num_m_blocks - 1 - block;
+
+  // --- Step 3: Compute the work coordinates ---
+  int qo_len = params.dyn_qo_indptr[bidb + 1] - params.dyn_qo_indptr[bidb];
+  int packed_qo_len = qo_len * (uint32_t)gqa_group_size;
+  int packed_qo_start = block * CTA_TILE_Q;
+  int kv_len = params.dyn_kv_len[bidb];
+
+  // For non-split KV: kv_start = 0, kv_end = kv_len
+  int kv_start = 0;
+  int kv_end = kv_len;
+  int partial_o_offset = 0;  // write-through (no KV splitting)
+
+  return std::tuple(
+      (IdType)params.dyn_qo_indptr[bidb],   // q_indptr
+      (IdType)params.dyn_kv_indptr[bidb],    // kv_indptr
+      (IdType)partial_o_offset,              // partial_indptr (0 for non-split)
+      (IdType)qo_len,                        // q_len
+      (IdType)kv_len,                        // kv_len
+      (IdType)packed_qo_start,               // packed_qo_start
+      (IdType)kv_start,                      // kv_start
+      (IdType)kv_end,                        // kv_end
+      (IdType)kv_head_idx,                   // kv_head_idx
+      params.dyn_len_kv_chunk,               // len_kv_chunk
+      bidb,                                  // updated bidb for next iteration
+      group_start_tile                        // updated group_start for next iteration
+  );
+}
+
 template <typename KTraits>
 __device__ __forceinline__ void prefetch_offest(
     const uint32_t packed_block_iter_base, const uint32_t packed_kv_bound,
@@ -257,32 +381,66 @@ struct BlockBatchPagedAttentionPersistent {
                  lane_idx % KTraits::KV_THR_LAYOUT_COL);
     size_t thr_local_kv_offset[NUM_MMA_KV * KTraits::KV_THR_LAYOUT_COL / 2 / KTraits::NUM_WARPS_Q];
 
-    // LPT runtime tile fetching: use atomic counter if tile_counter is set,
-    // otherwise fall back to static work_indptr assignment
-    const bool use_lpt = (params.tile_counter != nullptr);
-    IdType work_idx_start = use_lpt ? 0 : work_indptr[blockIdx.y];
-    IdType work_idx_end = use_lpt ? params.total_num_works : work_indptr[blockIdx.y + 1];
+    // Choose scheduling mode
+    const bool use_dynamic = (params.dyn_num_seqs > 0);
+
+    // Dynamic scheduler state (for tile_idx_to_work_tile warm start)
+    int dyn_bidb = 0, dyn_group_start = 0;
 
 #pragma unroll 1
-    for (IdType work_idx = work_idx_start; ; ) {
-      if (use_lpt) {
-        // Atomically grab the next tile (LPT order: tiles sorted by cost descending)
+    for (IdType work_idx = use_dynamic ? 0 : work_indptr[blockIdx.y]; ; ) {
+      IdType q_indptr_val, kv_indptr_val, o_indptr, q_len, kv_len;
+      IdType packed_qo_start, kv_start, kv_end, kv_head_idx;
+      int len_kv_chunk;
+
+      if (use_dynamic) {
+        // FA3-style dynamic scheduling: atomically grab next tile index
         __syncthreads();
+        IdType tile_idx;
         if (threadIdx.x == 0) {
-          work_idx = atomicAdd(params.tile_counter, 1);
+          tile_idx = atomicAdd(params.tile_counter, 1);
         }
-        // Broadcast work_idx from thread 0 to all threads in the block
-        work_idx = __shfl_sync(0xffffffff, work_idx, 0);
-        // For multi-warp blocks, use shared memory to broadcast across warps
+        // Broadcast tile_idx to all threads via smem
         if (warp_idx == 0 && lane_idx == 0) {
-          reinterpret_cast<volatile IdType*>(smem_storage)[0] = work_idx;
+          reinterpret_cast<volatile IdType*>(smem_storage)[0] = tile_idx;
         }
         __syncthreads();
-        work_idx = reinterpret_cast<volatile IdType*>(smem_storage)[0];
-        if (work_idx >= work_idx_end) break;
+        tile_idx = reinterpret_cast<volatile IdType*>(smem_storage)[0];
+        if (tile_idx >= params.dyn_total_tiles) break;
+
+        // Map tile_idx to work coordinates
+        auto result = tile_idx_to_work_tile<CTA_TILE_Q, Params, IdType>(
+            params, tile_idx, dyn_bidb, dyn_group_start);
+        q_indptr_val = std::get<0>(result);
+        kv_indptr_val = std::get<1>(result);
+        o_indptr = std::get<2>(result);
+        q_len = std::get<3>(result);
+        kv_len = std::get<4>(result);
+        packed_qo_start = std::get<5>(result);
+        kv_start = std::get<6>(result);
+        kv_end = std::get<7>(result);
+        kv_head_idx = std::get<8>(result);
+        len_kv_chunk = std::get<9>(result);
+        dyn_bidb = std::get<10>(result);
+        dyn_group_start = std::get<11>(result);
+        // Check for sentinel (past end of sequences)
+        if (dyn_bidb >= params.dyn_num_seqs) break;
       } else {
-        if (work_idx >= work_idx_end) break;
+        // Static scheduling: iterate work_indptr range
+        if (work_idx >= work_indptr[blockIdx.y + 1]) break;
+        auto coords = get_block_coord(params, work_idx);
+        q_indptr_val = std::get<0>(coords);
+        kv_indptr_val = std::get<1>(coords);
+        o_indptr = std::get<2>(coords);
+        q_len = std::get<3>(coords);
+        kv_len = std::get<4>(coords);
+        packed_qo_start = std::get<5>(coords);
+        kv_start = std::get<6>(coords);
+        kv_end = std::get<7>(coords);
+        kv_head_idx = std::get<8>(coords);
+        len_kv_chunk = std::get<9>(coords);
       }
+
       // profile log
       if constexpr (CTA_TILE_Q > 64) {
         PROFILER_EVENT_START(profiler_closure, PersistentProfileEventType::kRunner1);
@@ -290,8 +448,9 @@ struct BlockBatchPagedAttentionPersistent {
         PROFILER_EVENT_START(profiler_closure, PersistentProfileEventType::kRunner2);
       }
 
-      const auto [q_indptr, kv_indptr, o_indptr, q_len, kv_len, packed_qo_start, kv_start, kv_end,
-                  kv_head_idx, len_kv_chunk] = get_block_coord(params, work_idx);
+      // Alias for compatibility with rest of the function
+      const auto q_indptr = q_indptr_val;
+      const auto kv_indptr = kv_indptr_val;
 
       const uint32_t kv_chunk_idx = kv_start / len_kv_chunk;
       const uint32_t num_kv_chunks = ceil_div(
@@ -474,8 +633,8 @@ struct BlockBatchPagedAttentionPersistent {
         PROFILER_EVENT_END(profiler_closure, PersistentProfileEventType::kRunner2);
       }
 
-      // Advance to next work item (for static path; LPT path uses atomic at loop top)
-      if (!use_lpt) {
+      // Advance to next work item (for static path; dynamic uses atomic at loop top)
+      if (!use_dynamic) {
         ++work_idx;
       }
     }

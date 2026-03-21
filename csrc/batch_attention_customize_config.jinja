@@ -96,9 +96,20 @@ struct PersistentParams {
   IdType* merge_o_indices;
   IdType* num_packed_qo_len;
 
-  // LPT runtime tile fetching
+  // LPT runtime tile fetching (v1/v2 static approach)
   IdType* tile_counter;  // global atomic counter for this task (nullptr = use work_indptr)
   int32_t total_num_works;  // total number of work items for this task
+
+  // Dynamic scheduler (v3 FA3-style) — per-sequence metadata
+  // When dyn_num_seqs > 0, use dynamic tile_idx_to_work_tile() instead of get_block_coord()
+  int32_t dyn_num_seqs;            // number of sequences in this queue (0 = disabled)
+  IdType* dyn_qo_indptr;           // [num_seqs+1] cumulative Q token counts
+  IdType* dyn_kv_indptr;           // [num_seqs] page table offset per sequence
+  IdType* dyn_kv_len;              // [num_seqs] KV length per sequence
+  IdType* dyn_num_m_blocks;        // [num_seqs] Q tiles per sequence = ceil_div(packed_qo_len, CTA_TILE_Q)
+  IdType* dyn_nheads_in_l2;        // [num_seqs] number of heads fitting in L2 per sequence
+  int32_t dyn_total_tiles;         // total tiles across all sequences (for bounds check)
+  int32_t dyn_len_kv_chunk;        // KV chunk size limit for this task
 
   uint32_t num_kv_heads;
   uint_fastdiv gqa_group_size;
