@@ -1270,12 +1270,9 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
       }
       plan_info.dyn[task].num_seqs = num_seqs;
       plan_info.dyn[task].total_tiles = total_tiles;
-      // KV chunk limit (same formula as static scheduler)
-      int64_t total_kv_lens = 0;
-      for (int s = 0; s < num_seqs; ++s) total_kv_lens += dyn_kv_len_vec[s];
-      int kv_len_limit = std::max(128, (int)ceil_div(total_kv_lens * num_kv_heads, (int64_t)num_clusters));
-      if (tile_q >= 64) kv_len_limit /= std::min(num_kv_heads, 2U);
-      plan_info.dyn[task].len_kv_chunk = kv_len_limit;
+      // For dynamic scheduler: disable KV splitting by setting chunk size to max
+      // (KV splitting with dynamic scheduler is not yet implemented — partial_o_offset is always 0)
+      plan_info.dyn[task].len_kv_chunk = INT_MAX;
 
       // Allocate and copy per-sequence metadata to device
       int alloc_seqs = std::max(num_seqs, 1);
