@@ -73,59 +73,67 @@ template <uint32_t CTA_TILE_Q, typename Params, typename IdType>
 __device__ __forceinline__ auto tile_idx_to_work_tile(
     const Params& params, int tile_idx, int prev_bidb, int prev_group_start) {
 
-  const int lane = threadIdx.x % 32;
   const uint32_t num_kv_heads = params.num_kv_heads;
   const uint_fastdiv& gqa_group_size = params.gqa_group_size;
+  const int uniform_m = params.dyn_uniform_num_m_blocks;
 
-  // --- Step 1: Find which sequence this tile belongs to ---
-  // Each lane holds num_tiles for a different sequence (31 sequences per warp iteration)
-  auto get_num_tiles = [&](int seq_start) -> int {
-    int seq_idx = lane + seq_start;
-    if (seq_idx < params.dyn_num_seqs && lane < 31) {
-      return params.dyn_num_m_blocks[seq_idx];
+  int bidb, num_m_blocks, mh_block, group_start_tile;
+
+  if (uniform_m > 0) {
+    // --- Fast O(1) path: all sequences have same num_m_blocks ---
+    // Tile layout: tiles_per_seq = uniform_m * num_kv_heads
+    // bidb = tile_idx / tiles_per_seq, mh_block = tile_idx % tiles_per_seq
+    int tiles_per_seq = uniform_m * num_kv_heads;
+    bidb = tile_idx / tiles_per_seq;
+    mh_block = tile_idx - bidb * tiles_per_seq;
+    num_m_blocks = uniform_m;
+    group_start_tile = bidb * tiles_per_seq;
+  } else {
+    // --- General path: warp-level binary search for sequence ---
+    const int lane = threadIdx.x % 32;
+
+    auto get_num_tiles = [&](int seq_start) -> int {
+      int seq_idx = lane + seq_start;
+      if (seq_idx < params.dyn_num_seqs && lane < 31) {
+        return params.dyn_num_m_blocks[seq_idx];
+      }
+      return 0;
+    };
+
+    bidb = prev_bidb;
+    int num_tiles = get_num_tiles(bidb);
+    int num_tiles_cumulative = warp_prefix_sum(num_tiles);
+    int tiles_in_group = __shfl_sync(0xffffffff, num_tiles_cumulative, 31);
+    int group_end_tile = prev_group_start + tiles_in_group * num_kv_heads;
+
+    while (group_end_tile <= tile_idx) {
+      bidb += 31;
+      if (bidb >= params.dyn_num_seqs) {
+        return std::tuple((IdType)0, (IdType)0, (IdType)0, (IdType)0, (IdType)0,
+                          (IdType)0, (IdType)0, (IdType)0, (IdType)0,
+                          params.dyn_len_kv_chunk, bidb, group_end_tile);
+      }
+      num_tiles = get_num_tiles(bidb);
+      num_tiles_cumulative = warp_prefix_sum(num_tiles);
+      tiles_in_group = __shfl_sync(0xffffffff, num_tiles_cumulative, 31);
+      group_end_tile += tiles_in_group * num_kv_heads;
     }
-    return 0;
-  };
+    group_start_tile = group_end_tile - tiles_in_group * num_kv_heads;
 
-  int bidb = prev_bidb;
-  int num_tiles = get_num_tiles(bidb);
-  int num_tiles_cumulative = warp_prefix_sum(num_tiles);
-  int tiles_in_group = __shfl_sync(0xffffffff, num_tiles_cumulative, 31);
-  int group_end_tile = prev_group_start + tiles_in_group * num_kv_heads;
-
-  while (group_end_tile <= tile_idx) {
-    bidb += 31;  // advance by warp width - 1
-    if (bidb >= params.dyn_num_seqs) {
-      // Past the end — return sentinel
-      // q_indptr, kv_indptr, partial_o, q_len, kv_len, qo_start, kv_start, kv_end, kv_head, chunk
-      return std::tuple((IdType)0, (IdType)0, (IdType)0, (IdType)0, (IdType)0,
-                        (IdType)0, (IdType)0, (IdType)0, (IdType)0,
-                        params.dyn_len_kv_chunk, bidb, group_end_tile);
-    }
-    num_tiles = get_num_tiles(bidb);
-    num_tiles_cumulative = warp_prefix_sum(num_tiles);
-    tiles_in_group = __shfl_sync(0xffffffff, num_tiles_cumulative, 31);
-    group_end_tile += tiles_in_group * num_kv_heads;
+    int batch_idx_in_group = __popc(__ballot_sync(0xffffffff,
+        group_start_tile + num_tiles_cumulative * num_kv_heads <= tile_idx));
+    bidb += batch_idx_in_group;
+    num_m_blocks = __shfl_sync(0xffffffff, num_tiles, batch_idx_in_group);
+    group_start_tile += (batch_idx_in_group == 0 ? 0 :
+        __shfl_sync(0xffffffff, num_tiles_cumulative, batch_idx_in_group - 1)) * num_kv_heads;
+    mh_block = tile_idx - group_start_tile;
   }
-  int group_start_tile = group_end_tile - tiles_in_group * num_kv_heads;
-
-  // Find exact sequence within the group
-  int batch_idx_in_group = __popc(__ballot_sync(0xffffffff,
-      group_start_tile + num_tiles_cumulative * num_kv_heads <= tile_idx));
-  bidb += batch_idx_in_group;
-  int num_m_blocks = __shfl_sync(0xffffffff, num_tiles, batch_idx_in_group);
-  group_start_tile += (batch_idx_in_group == 0 ? 0 :
-      __shfl_sync(0xffffffff, num_tiles_cumulative, batch_idx_in_group - 1)) * num_kv_heads;
 
   // --- Step 2: Map within-sequence tile index to (head, q_block) with L2 awareness ---
-  int mh_block = tile_idx - group_start_tile;
-
-  // L2-aware LPT mapping (no KV splitting)
   int nheads_in_l2 = params.dyn_nheads_in_l2[bidb];
   int mh_in_l2 = nheads_in_l2 * num_m_blocks;
   int section_idx = mh_block / mh_in_l2;
   int l2_mod = mh_block - section_idx * mh_in_l2;
-  // Handle tail section (fewer heads)
   int nheads_remainder = num_kv_heads - section_idx * nheads_in_l2;
   int nheads_in_this_section = nheads_in_l2 <= nheads_remainder ? nheads_in_l2 : nheads_remainder;
   int block = l2_mod / nheads_in_this_section;
@@ -141,24 +149,23 @@ __device__ __forceinline__ auto tile_idx_to_work_tile(
   int packed_qo_start = block * CTA_TILE_Q;
   int kv_len = params.dyn_kv_len[bidb];
 
-  // For non-split KV: kv_start = 0, kv_end = kv_len
   int kv_start = 0;
   int kv_end = kv_len;
-  int partial_o_offset = 0;  // write-through (no KV splitting)
+  int partial_o_offset = 0;
 
   return std::tuple(
-      (IdType)params.dyn_qo_indptr[bidb],   // q_indptr (global Q buffer offset)
-      (IdType)params.dyn_kv_indptr[bidb],    // kv_indptr
-      (IdType)partial_o_offset,              // partial_indptr (0 for non-split)
-      (IdType)qo_len,                        // q_len
-      (IdType)kv_len,                        // kv_len
-      (IdType)packed_qo_start,               // packed_qo_start
-      (IdType)kv_start,                      // kv_start
-      (IdType)kv_end,                        // kv_end
-      (IdType)kv_head_idx,                   // kv_head_idx
-      params.dyn_len_kv_chunk,               // len_kv_chunk
-      bidb,                                  // updated bidb for next iteration
-      group_start_tile                        // updated group_start for next iteration
+      (IdType)params.dyn_qo_indptr[bidb],
+      (IdType)params.dyn_kv_indptr[bidb],
+      (IdType)partial_o_offset,
+      (IdType)qo_len,
+      (IdType)kv_len,
+      (IdType)packed_qo_start,
+      (IdType)kv_start,
+      (IdType)kv_end,
+      (IdType)kv_head_idx,
+      params.dyn_len_kv_chunk,
+      bidb,
+      group_start_tile
   );
 }
 
@@ -394,7 +401,7 @@ struct BlockBatchPagedAttentionPersistent {
       int len_kv_chunk;
 
       if (use_dynamic) {
-        // FA3-style dynamic scheduling: atomically grab next tile index
+        // Dynamic scheduling: atomically grab next tile index (sequential)
         __syncthreads();
         IdType tile_idx;
         if (threadIdx.x == 0) {
