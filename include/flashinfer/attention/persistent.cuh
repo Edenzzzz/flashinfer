@@ -401,7 +401,7 @@ struct BlockBatchPagedAttentionPersistent {
       int len_kv_chunk;
 
       if (use_dynamic) {
-        // Dynamic scheduling: atomically grab next tile index (sequential)
+        // Dynamic scheduling: sequential atomicAdd (strict LPT order)
         __syncthreads();
         IdType tile_idx;
         if (threadIdx.x == 0) {

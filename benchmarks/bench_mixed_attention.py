@@ -86,6 +86,7 @@ def run_bench(
     measurements = bench_gpu_time(lambda: wrapper_old.run(q, kv_data))
     ms_old = np.median(measurements)
 
+    # Persistent with FlippedSchedule (default — auto-selects flipped when beneficial)
     wrapper_persistent = flashinfer.BatchAttention(kv_layout="NHD")
     wrapper_persistent.plan(
         q_indptr.to(device),
@@ -103,8 +104,30 @@ def run_bench(
     )
     o_persistent, _ = wrapper_persistent.run(q, kv_data)
     measurements_persistent = bench_gpu_time(lambda: wrapper_persistent.run(q, kv_data))
-    ms_persistent = np.mean(measurements_persistent)
+    ms_persistent = np.median(measurements_persistent)
     torch.testing.assert_close(o_persistent, o, rtol=4e-3, atol=4e-3)
+
+    # Persistent with static schedule (FlippedSchedule disabled)
+    wrapper_persistent_static = flashinfer.BatchAttention(kv_layout="NHD")
+    wrapper_persistent_static.plan(
+        q_indptr.to(device),
+        kv_indptr.to(device),
+        torch.arange(num_blocks, dtype=torch.int32, device=device),
+        seq_lens.to(device),
+        num_qo_heads,
+        num_kv_heads,
+        head_dim,
+        head_dim,
+        page_block_size,
+        causal=causal,
+        q_data_type=torch.bfloat16,
+        kv_data_type=torch.bfloat16,
+        flipped_schedule=False,
+    )
+    o_persistent_static, _ = wrapper_persistent_static.run(q, kv_data)
+    measurements_persistent_static = bench_gpu_time(lambda: wrapper_persistent_static.run(q, kv_data))
+    ms_persistent_static = np.median(measurements_persistent_static)
+    torch.testing.assert_close(o_persistent_static, o, rtol=4e-3, atol=4e-3)
 
     # Batched POD Attention
     q_d = q[: d_q_indptr[-1]]
@@ -256,9 +279,13 @@ def run_bench(
     if len(p_kv_lens) == 1:
         print(f"Elapsed time (POD Attention): {ms_pod:.2f} ms")
         print(f"Elapsed time (Sequential two kernels): {ms_seq_two_kernels:.2f} ms")
-    print(f"Elapsed time (Persistent BatchAttention): {ms_persistent:.2f} ms")
+    print(f"Elapsed time (Persistent FlippedSchedule): {ms_persistent:.2f} ms")
+    print(f"Elapsed time (Persistent Static): {ms_persistent_static:.2f} ms")
     print(
-        f"Batch POD speedup over Persistent BatchAttention: {ms_persistent / ms_batch_pod:.2f}x"
+        f"Batch POD speedup over Persistent FlippedSchedule: {ms_persistent / ms_batch_pod:.2f}x"
+    )
+    print(
+        f"Batch POD speedup over Persistent Static: {ms_persistent_static / ms_batch_pod:.2f}x"
     )
 
     total_bytes = (
@@ -282,7 +309,11 @@ def run_bench(
         )
     bandwidth_persistent_gb_s = total_bytes / (ms_persistent * 1e-3) / (1024**3)
     print(
-        f"Memory bandwidth (Persistent BatchAttention): {bandwidth_persistent_gb_s:.2f} GB/s"
+        f"Memory bandwidth (Persistent FlippedSchedule): {bandwidth_persistent_gb_s:.2f} GB/s"
+    )
+    bandwidth_persistent_static_gb_s = total_bytes / (ms_persistent_static * 1e-3) / (1024**3)
+    print(
+        f"Memory bandwidth (Persistent Static): {bandwidth_persistent_static_gb_s:.2f} GB/s"
     )
 
     return ms_persistent / ms_batch_pod
