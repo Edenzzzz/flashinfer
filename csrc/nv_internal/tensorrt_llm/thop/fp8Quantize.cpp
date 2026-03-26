@@ -22,6 +22,20 @@
 #include "tensorrt_llm/thop/utils.h"
 #include "tvm/ffi/error.h"
 
+// Forward declarations for SGL quantization (defined in sgl_mxfp8_quant.cuh
+// and sgl_quant.cuh, compiled via quantization.cu)
+namespace sgl_quant {
+template <typename T_IN>
+void invokeMxFP8QuantizationSGL(int m, int k, const T_IN* input,
+                                cutlass::float_e4m3_t* quant_output, uint8_t* scale_factor,
+                                int multiProcessorCount, cudaStream_t stream);
+
+template <typename T_IN, bool UE8M0_SF>
+void invokeNvfp4QuantizationSGL(int m, int k, const T_IN* input, uint8_t* quant_output,
+                                uint8_t* scale_factor, float SFScaleVal, int multiProcessorCount,
+                                cudaStream_t stream);
+}  // namespace sgl_quant
+
 // input: [M, K], fp32/fp16/bf16/fp8_quantized
 // isSfSwizzledLayout: bool, if true, the scale factors are stored in swizzled layout, otherwise in
 // linear layout. See QuantizationSFLayout enum for more details about the two layouts.
@@ -180,6 +194,98 @@ void mxfp8_dequantize_host(TensorView value_e4m3, TensorView scale_ue8m08sf,
   }
 }
 
+// SGL mxfp8 quantization: uses 256-bit loads, no producer warp
+// input: [M, K], fp16/bf16
+// valMxFP8: [M, K], fp8_e4m3 (pre-allocated)
+// scaleFP8SF: [aligned_M, K/32], uint8 (pre-allocated)
+void mxfp8_quantize_sgl(TensorView input, TensorView valMxFP8, TensorView scaleFP8SF) {
+  CHECK_CUDA(input);
+  CHECK_CONTIGUOUS(input);
+
+  auto const& inputShape = input.sizes();
+  auto const& rank = inputShape.size();
+
+  TVM_FFI_ICHECK_GE(rank, 2) << "Input should be >=2D tensor.";
+  int64_t m = 1;
+  for (size_t i = 0; i < rank - 1; i++) {
+    m *= inputShape[i];
+  }
+  auto const k = inputShape[rank - 1];
+  TVM_FFI_ICHECK_EQ(k % 128, 0) << "k must be divisible by 128 for SGL mxfp8 quantization";
+
+  const thread_local int mMultiProcessorCount = tensorrt_llm::common::getMultiProcessorCount();
+
+  if (input.dtype() == dl_float16) {
+    sgl_quant::invokeMxFP8QuantizationSGL<half>(
+        m, k, reinterpret_cast<const half*>(input.data_ptr()),
+        reinterpret_cast<cutlass::float_e4m3_t*>(valMxFP8.data_ptr()),
+        reinterpret_cast<uint8_t*>(scaleFP8SF.data_ptr()), mMultiProcessorCount,
+        get_stream(input.device()));
+  } else if (input.dtype() == dl_bfloat16) {
+#ifdef ENABLE_BF16
+    sgl_quant::invokeMxFP8QuantizationSGL<__nv_bfloat16>(
+        m, k, reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+        reinterpret_cast<cutlass::float_e4m3_t*>(valMxFP8.data_ptr()),
+        reinterpret_cast<uint8_t*>(scaleFP8SF.data_ptr()), mMultiProcessorCount,
+        get_stream(input.device()));
+#else
+    TVM_FFI_LOG_AND_THROW(NotImplementedError)
+        << "BFloat16 must be enabled for SGL mxfp8 quantization.";
+#endif
+  } else {
+    TVM_FFI_LOG_AND_THROW(NotImplementedError)
+        << "mxfp8_quantize_sgl only supports fp16/bf16 input.";
+  }
+}
+
+// Generalized SGL NVFP4 quantization
+// input: [M, K], fp16/bf16
+// valFP4: [M, K/2], uint8 (pre-allocated, fp4 packed)
+// scaleSF: [aligned_M, K/16], uint8 (pre-allocated)
+// SFScaleVal: global scale factor
+void nvfp4_quantize_sgl(TensorView input, TensorView valFP4, TensorView scaleSF,
+                        double SFScaleVal) {
+  CHECK_CUDA(input);
+  CHECK_CONTIGUOUS(input);
+
+  auto const& inputShape = input.sizes();
+  auto const& rank = inputShape.size();
+
+  TVM_FFI_ICHECK_GE(rank, 2) << "Input should be >=2D tensor.";
+  int64_t m = 1;
+  for (size_t i = 0; i < rank - 1; i++) {
+    m *= inputShape[i];
+  }
+  auto const k = inputShape[rank - 1];
+  TVM_FFI_ICHECK_EQ(k % 128, 0) << "k must be divisible by 128 for SGL nvfp4 quantization";
+
+  const thread_local int mMultiProcessorCount = tensorrt_llm::common::getMultiProcessorCount();
+
+  if (input.dtype() == dl_float16) {
+    sgl_quant::invokeNvfp4QuantizationSGL<half, false>(
+        m, k, reinterpret_cast<const half*>(input.data_ptr()),
+        reinterpret_cast<uint8_t*>(valFP4.data_ptr()),
+        reinterpret_cast<uint8_t*>(scaleSF.data_ptr()), static_cast<float>(SFScaleVal),
+        mMultiProcessorCount, get_stream(input.device()));
+  } else if (input.dtype() == dl_bfloat16) {
+#ifdef ENABLE_BF16
+    sgl_quant::invokeNvfp4QuantizationSGL<__nv_bfloat16, false>(
+        m, k, reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+        reinterpret_cast<uint8_t*>(valFP4.data_ptr()),
+        reinterpret_cast<uint8_t*>(scaleSF.data_ptr()), static_cast<float>(SFScaleVal),
+        mMultiProcessorCount, get_stream(input.device()));
+#else
+    TVM_FFI_LOG_AND_THROW(NotImplementedError)
+        << "BFloat16 must be enabled for SGL nvfp4 quantization.";
+#endif
+  } else {
+    TVM_FFI_LOG_AND_THROW(NotImplementedError)
+        << "nvfp4_quantize_sgl only supports fp16/bf16 input.";
+  }
+}
+
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(mxfp8_dequantize_host, mxfp8_dequantize_host);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(mxfp8_quantize_host, mxfp8_quantize_host);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(mxfp8_quantize, mxfp8_quantize);
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(mxfp8_quantize_sgl, mxfp8_quantize_sgl);
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(nvfp4_quantize_sgl, nvfp4_quantize_sgl);

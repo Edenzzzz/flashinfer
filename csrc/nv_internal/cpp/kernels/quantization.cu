@@ -18,6 +18,8 @@
 #include <cudaTypedefs.h>
 #include <float.h>
 
+#include "sgl_mxfp8_quant.cuh"
+#include "sgl_quant.cuh"
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/cudaTypeUtils.cuh"
 #include "tensorrt_llm/common/cudaUtils.h"
@@ -569,3 +571,31 @@ template void invokeFP4Quantization<__nv_fp8_e4m3, 32>(
 
 }  // namespace kernels
 }  // namespace tensorrt_llm
+
+// Explicit template instantiations for SGL mxfp8 quantization
+template void sgl_quant::invokeMxFP8QuantizationSGL<half>(int m, int k, const half* input,
+                                                          cutlass::float_e4m3_t* quant_output,
+                                                          uint8_t* scale_factor,
+                                                          int multiProcessorCount,
+                                                          cudaStream_t stream);
+
+template void sgl_quant::invokeMxFP8QuantizationSGL<__nv_bfloat16>(
+    int m, int k, const __nv_bfloat16* input, cutlass::float_e4m3_t* quant_output,
+    uint8_t* scale_factor, int multiProcessorCount, cudaStream_t stream);
+
+// Generalized SGL quant: NVFP4 (UE8M0_SF=false)
+template void sgl_quant::invokeNvfp4QuantizationSGL<half, false>(int, int, const half*, uint8_t*,
+                                                                 uint8_t*, float, int,
+                                                                 cudaStream_t);
+template void sgl_quant::invokeNvfp4QuantizationSGL<__nv_bfloat16, false>(int, int,
+                                                                          const __nv_bfloat16*,
+                                                                          uint8_t*, uint8_t*, float,
+                                                                          int, cudaStream_t);
+
+// Generalized SGL quant: MXFP4 (UE8M0_SF=true)
+template void sgl_quant::invokeNvfp4QuantizationSGL<half, true>(int, int, const half*, uint8_t*,
+                                                                uint8_t*, float, int, cudaStream_t);
+template void sgl_quant::invokeNvfp4QuantizationSGL<__nv_bfloat16, true>(int, int,
+                                                                         const __nv_bfloat16*,
+                                                                         uint8_t*, uint8_t*, float,
+                                                                         int, cudaStream_t);

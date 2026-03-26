@@ -841,6 +841,7 @@ def nvfp4_quantize(
     do_shuffle=False,
     sf_vec_size=16,
     enable_pdl=None,
+    use_sgl=False,
 ):
     """
     Quantize input tensor to NVFP4 format.
@@ -853,12 +854,27 @@ def nvfp4_quantize(
         sf_vec_size (int, optional): Scale factor vector size. Defaults to 16.
         enable_pdl (Optional[bool], optional): Whether to enable PDL (Programmatic Dependent Launch).
             If None, automatically detects based on device capability. Defaults to None.
+        use_sgl (bool, optional): Whether to use the SGL kernel implementation which uses 256-bit
+            loads and eliminates the producer warp. Requires K divisible by 128.
+            Forces linear SF layout with sf_vec_size=16. Defaults to False.
 
     Returns:
         Tuple[torch.Tensor, torch.Tensor]: A tuple containing:
             - Quantized tensor of shape [M, K/2] with dtype FLOAT4_E2M1X2
             - Scale factors tensor with shape determined by layout and sf_vec_size
     """
+
+    if use_sgl:
+        assert a.shape[-1] % 128 == 0, (
+            "K must be divisible by 128 for SGL nvfp4 quantization"
+        )
+        from .fp8_quantization import get_mxfp8_quantization_sm100_module
+
+        global_scale_val = a_global_sf.item() if a_global_sf.numel() == 1 else 1.0
+        return get_mxfp8_quantization_sm100_module().nvfp4_quantize_sgl_sm100(
+            a,
+            global_scale_val,
+        )
 
     if do_shuffle:
         # Weights 128x4 + shuffle. It is done during the model load and we do not care much about the perf

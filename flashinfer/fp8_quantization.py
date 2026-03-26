@@ -136,10 +136,114 @@ def get_mxfp8_quantization_sm100_module():
     ) -> torch.Tensor:
         return input.new_empty([input.shape[0], input.shape[1]], dtype=torch.float32)
 
+    @register_custom_op(
+        "flashinfer::mxfp8_quantize_sgl_sm100",
+        mutates_args=(""),
+    )
+    def mxfp8_quantize_sgl_sm100(
+        input: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Quantize input tensor to MxFP8 format using SGL kernel.
+
+        Uses 256-bit loads and eliminates producer warp for higher throughput
+        on large matrices. Scale factors are in linear (non-swizzled) layout.
+
+        Args:
+            input (torch.Tensor): Input tensor of shape [M, K] with dtype fp16/bf16.
+                K must be divisible by 128.
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: (quantized fp8 tensor, scale factors)
+        """
+        m = input.numel() // input.shape[-1]
+        k = input.shape[-1]
+        out_val = torch.empty(
+            input.shape,
+            dtype=torch.float8_e4m3fn,
+            device=input.device,
+        )
+        aligned_m = (m + 127) // 128 * 128
+        out_sf = torch.zeros(
+            (aligned_m, k // 32), dtype=torch.uint8, device=input.device
+        )
+        module.mxfp8_quantize_sgl(
+            input,
+            out_val,
+            out_sf,
+        )
+        return out_val, out_sf
+
+    @register_fake_op("flashinfer::mxfp8_quantize_sgl_sm100")
+    def _fake_mxfp8_quantize_sgl_sm100(
+        input: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        m = input.numel() // input.shape[-1]
+        k = input.shape[-1]
+        aligned_m = (m + 127) // 128 * 128
+        return (
+            input.new_empty(input.shape, dtype=torch.float8_e4m3fn),
+            input.new_empty([aligned_m, k // 32], dtype=torch.uint8),
+        )
+
+    @register_custom_op(
+        "flashinfer::nvfp4_quantize_sgl_sm100",
+        mutates_args=(""),
+    )
+    def nvfp4_quantize_sgl_sm100(
+        input: torch.Tensor,
+        global_scale: float = 1.0,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Quantize input tensor to NVFP4 format using SGL-style kernel.
+
+        Uses 256-bit loads and eliminates producer warp for higher throughput.
+        Scale factors are in linear layout with SF_VEC_SIZE=16.
+
+        Args:
+            input (torch.Tensor): Input tensor of shape [M, K] with dtype fp16/bf16.
+                K must be divisible by 128.
+            global_scale (float): Global scale factor. Defaults to 1.0.
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: (quantized fp4 tensor [M, K/2], scale factors)
+        """
+        m = input.numel() // input.shape[-1]
+        k = input.shape[-1]
+        out_val = torch.empty(
+            (*input.shape[:-1], k // 2),
+            dtype=torch.uint8,
+            device=input.device,
+        )
+        aligned_m = (m + 127) // 128 * 128
+        out_sf = torch.zeros(
+            (aligned_m, k // 16), dtype=torch.uint8, device=input.device
+        )
+        module.nvfp4_quantize_sgl(
+            input,
+            out_val,
+            out_sf,
+            global_scale,
+        )
+        return out_val, out_sf
+
+    @register_fake_op("flashinfer::nvfp4_quantize_sgl_sm100")
+    def _fake_nvfp4_quantize_sgl_sm100(
+        input: torch.Tensor,
+        global_scale: float = 1.0,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        m = input.numel() // input.shape[-1]
+        k = input.shape[-1]
+        aligned_m = (m + 127) // 128 * 128
+        return (
+            input.new_empty((*input.shape[:-1], k // 2), dtype=torch.uint8),
+            input.new_empty([aligned_m, k // 16], dtype=torch.uint8),
+        )
+
     # Register the module
     return SimpleNamespace(
         mxfp8_quantize_sm100=mxfp8_quantize_sm100,
         mxfp8_dequantize_host_sm100=mxfp8_dequantize_host_sm100,
+        mxfp8_quantize_sgl_sm100=mxfp8_quantize_sgl_sm100,
+        nvfp4_quantize_sgl_sm100=nvfp4_quantize_sgl_sm100,
     )
 
 
@@ -149,6 +253,7 @@ def mxfp8_quantize(
     is_sf_swizzled_layout: bool = True,
     alignment: int = 32,
     enable_pdl: Optional[bool] = None,
+    use_sgl: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Quantize input tensor to MxFP8 format.
 
@@ -161,6 +266,9 @@ def mxfp8_quantize(
         alignment (int, optional): sfVecSize. Defaults to 32.
         enable_pdl (Optional[bool], optional): Whether to enable PDL (Programmatic Dependent Launch).
             If None, automatically detects based on device capability. Defaults to None.
+        use_sgl (bool, optional): Whether to use the SGL kernel implementation which uses 256-bit
+            loads and eliminates the producer warp for higher throughput on large matrices.
+            Requires K divisible by 128. Forces non-swizzled SF layout. Defaults to False.
     Returns:
         Tuple[torch.Tensor, torch.Tensor]: A tuple containing:
             - Quantized tensor of shape [M, K] with dtype FLOAT8_E4M3
@@ -169,6 +277,16 @@ def mxfp8_quantize(
     sf_vec_size = 32
 
     assert input.shape[-1] % sf_vec_size == 0
+
+    if use_sgl:
+        assert input.shape[-1] % 128 == 0, (
+            "K must be divisible by 128 for SGL mxfp8 quantization"
+        )
+        x_q, sf = get_mxfp8_quantization_sm100_module().mxfp8_quantize_sgl_sm100(
+            input,
+        )
+        return x_q, sf
+
     if enable_pdl is None:
         enable_pdl = device_support_pdl(input.device)
     x_q, sf = get_mxfp8_quantization_sm100_module().mxfp8_quantize_sm100(
