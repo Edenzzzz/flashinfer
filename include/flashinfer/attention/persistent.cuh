@@ -87,10 +87,11 @@ __device__ __forceinline__ auto tile_idx_to_work_tile(
   int bidb, num_m_blocks, mh_block, group_start_tile;
 
   if (uniform_m > 0) {
-    // --- Fast O(1) path: all sequences have same num_m_blocks ---
-    // Tile layout: tiles_per_seq = uniform_m * num_kv_heads
-    // bidb = tile_idx / tiles_per_seq, mh_block = tile_idx % tiles_per_seq
-    int tiles_per_seq = uniform_m * num_kv_heads;
+    // --- Fast O(1) path: all sequences have same tiles_per_seq ---
+    // uniform_m > 0 only when all seqs have same num_m_blocks AND same num_kv_chunks.
+    // tiles_per_seq = uniform_m * num_kv_heads * uniform_chunks
+    int uniform_chunks = params.dyn_num_kv_chunks ? params.dyn_num_kv_chunks[0] : 1;
+    int tiles_per_seq = uniform_m * num_kv_heads * uniform_chunks;
     bidb = tile_idx / tiles_per_seq;
     mh_block = tile_idx - bidb * tiles_per_seq;
     num_m_blocks = uniform_m;
@@ -103,7 +104,9 @@ __device__ __forceinline__ auto tile_idx_to_work_tile(
     auto get_num_tiles = [&](int seq_start) -> int {
       int seq_idx = lane + seq_start;
       if (seq_idx < dyn_ns && lane < 31) {
-        return params.dyn_num_m_blocks[seq_idx];
+        int nm = params.dyn_num_m_blocks[seq_idx];
+        int nc = params.dyn_num_kv_chunks ? params.dyn_num_kv_chunks[seq_idx] : 1;
+        return nm * nc;
       }
       return 0;
     };
@@ -137,7 +140,16 @@ __device__ __forceinline__ auto tile_idx_to_work_tile(
     mh_block = tile_idx - group_start_tile;
   }
 
-  // --- Step 2: Map within-sequence tile index to (head, q_block) with L2 awareness ---
+  // --- Step 2: Extract chunk index, then map (head, q_block) with L2 awareness ---
+  int num_kv_chunks = params.dyn_num_kv_chunks ? params.dyn_num_kv_chunks[bidb] : 1;
+  int mh_block_with_chunks = mh_block;
+  int chunk_idx = 0;
+  if (num_kv_chunks > 1) {
+    // Layout: mhc_block = mh_block * num_kv_chunks + chunk_idx
+    mh_block = mh_block_with_chunks / num_kv_chunks;
+    chunk_idx = mh_block_with_chunks - mh_block * num_kv_chunks;
+  }
+
   int nheads_in_l2 = params.dyn_nheads_in_l2[bidb];
   int mh_in_l2 = nheads_in_l2 * num_m_blocks;
   int section_idx = mh_block / mh_in_l2;
@@ -156,20 +168,20 @@ __device__ __forceinline__ auto tile_idx_to_work_tile(
   int packed_qo_len = qo_len * (uint32_t)gqa_group_size;
   int packed_qo_start = block * CTA_TILE_Q;
   int kv_len = params.dyn_kv_len[bidb];
+  int len_kv_chunk_val = dyn_scalar<Params, IdType>(params, 2, params.dyn_len_kv_chunk);
 
-  int kv_start = 0;
-  // Clamp kv_end for causal: avoid processing KV tiles beyond the causal boundary.
-  // Without this, tiles where effective_kv=0 (kv_len < q_len) process unnecessary KV,
-  // producing different floating-point results from the static scheduler (which clips kv_end to 0).
-  int kv_end;
+  // Split-KV: compute kv_start/kv_end for this chunk
+  int kv_start = chunk_idx * len_kv_chunk_val;
+  int kv_end = min((int)kv_len, kv_start + len_kv_chunk_val);
+  // Clamp kv_end for causal: avoid processing KV beyond the causal boundary
   if constexpr (CAUSAL) {
     uint32_t gqa_group_size = params.gqa_group_size;
     int causal_kv_end = (int)kv_len - (int)qo_len +
         (int)ceil_div((uint32_t)packed_qo_start + CTA_TILE_Q, gqa_group_size);
-    kv_end = max(0, min(kv_len, causal_kv_end));
-  } else {
-    kv_end = kv_len;
+    kv_end = max(0, min(kv_end, causal_kv_end));
   }
+  kv_start = min(kv_start, kv_end);  // ensure kv_start <= kv_end
+
   // For split KV: use per-sequence partial_o_offset from planner
   int partial_o_offset = params.dyn_partial_o_offset ? params.dyn_partial_o_offset[bidb] : 0;
 

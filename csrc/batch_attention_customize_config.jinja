@@ -110,6 +110,7 @@ struct PersistentParams {
   IdType* dyn_num_m_blocks;        // [num_seqs] Q tiles per sequence = ceil_div(packed_qo_len, CTA_TILE_Q)
   IdType* dyn_nheads_in_l2;        // [num_seqs] number of heads fitting in L2 per sequence
   IdType* dyn_partial_o_offset;    // [num_seqs] base offset into partial_o buffer per sequence
+  IdType* dyn_num_kv_chunks;       // [num_seqs] number of KV chunks per sequence (for split-KV)
   int32_t dyn_total_tiles;         // total tiles across all sequences (for bounds check)
   int32_t dyn_len_kv_chunk;        // KV chunk size limit for this task
   int32_t dyn_uniform_num_m_blocks; // >0 if all seqs have same num_m_blocks (fast O(1) lookup)

@@ -225,6 +225,8 @@ void BatchPagedAttentionRun(TensorView float_workspace_buffer, TensorView int_wo
                 GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.dyn[i].nheads_in_l2_offset);
             params[i].dyn_partial_o_offset =
                 GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.dyn[i].partial_o_offset_offset);
+            params[i].dyn_num_kv_chunks =
+                GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.dyn[i].num_kv_chunks_offset);
             params[i].dyn_total_tiles = plan_info.dyn[i].total_tiles;
             params[i].dyn_len_kv_chunk = plan_info.dyn[i].len_kv_chunk;
             params[i].dyn_uniform_num_m_blocks = plan_info.dyn[i].uniform_num_m_blocks;
@@ -237,6 +239,7 @@ void BatchPagedAttentionRun(TensorView float_workspace_buffer, TensorView int_wo
             params[i].dyn_num_m_blocks = nullptr;
             params[i].dyn_nheads_in_l2 = nullptr;
             params[i].dyn_partial_o_offset = nullptr;
+            params[i].dyn_num_kv_chunks = nullptr;
             params[i].dyn_total_tiles = 0;
             params[i].dyn_len_kv_chunk = 0;
             params[i].dyn_uniform_num_m_blocks = 0;
