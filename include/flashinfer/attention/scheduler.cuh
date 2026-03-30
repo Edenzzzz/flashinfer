@@ -1048,20 +1048,29 @@ struct HolisticPlanInfo {
 
   // Dynamic scheduler (FA3-style): per-sequence metadata offsets per task
   struct {
-    int64_t qo_indptr_offset;     // [num_seqs] global Q buffer offset per sequence
-    int64_t qo_len_offset;        // [num_seqs] Q length per sequence
-    int64_t kv_indptr_offset;     // [num_seqs] page table offset per sequence
-    int64_t kv_len_offset;        // [num_seqs] KV length per sequence
-    int64_t num_m_blocks_offset;  // [num_seqs] Q tiles per sequence
-    int64_t nheads_in_l2_offset;  // [num_seqs] heads fitting in L2 per sequence
-    int32_t num_seqs;             // number of sequences in this queue
-    int32_t total_tiles;          // total tiles across all sequences
-    int32_t len_kv_chunk;         // KV chunk size limit for this task
+    int64_t qo_indptr_offset;         // [num_seqs] global Q buffer offset per sequence
+    int64_t qo_len_offset;           // [num_seqs] Q length per sequence
+    int64_t kv_indptr_offset;        // [num_seqs] page table offset per sequence
+    int64_t kv_len_offset;           // [num_seqs] KV length per sequence
+    int64_t num_m_blocks_offset;     // [num_seqs] Q tiles per sequence
+    int64_t nheads_in_l2_offset;     // [num_seqs] heads fitting in L2 per sequence
+    int64_t partial_o_offset_offset; // [num_seqs] base offset into partial_o buffer per sequence
+    int32_t num_seqs;                // number of sequences in this queue
+    int32_t total_tiles;             // total tiles across all sequences
+    int32_t len_kv_chunk;            // KV chunk size limit for this task
+    int32_t uniform_num_m_blocks;    // >0 if all seqs have same num_m_blocks (fast O(1) lookup)
   } dyn[NUM_TASKS];
+  // Offset into int_buffer for per-task dynamic scheduler scalars:
+  // [num_seqs_0, total_tiles_0, len_kv_chunk_0, uniform_num_m_blocks_0,
+  //  num_seqs_1, total_tiles_1, len_kv_chunk_1, uniform_num_m_blocks_1]
+  // When enable_cuda_graph, the kernel reads these from the buffer (updated per replay)
+  // instead of from the frozen plan_info scalars.
+  int64_t dyn_scalars_offset;
+  bool enable_cuda_graph;
 
   static constexpr uint32_t NUM_TASK_ARGS = 10;
-  static constexpr uint32_t NUM_DYN_ARGS = 9;  // per-task dynamic scheduler args
-  static constexpr uint32_t NUM_SHARED_ARGS = 9 + NUM_TASKS + 1 + NUM_TASKS * NUM_DYN_ARGS;
+  static constexpr uint32_t NUM_DYN_ARGS = 11;  // per-task dynamic scheduler args
+  static constexpr uint32_t NUM_SHARED_ARGS = 9 + NUM_TASKS + 1 + NUM_TASKS * NUM_DYN_ARGS + 3;  // +3 for dyn_scalars_offset, enable_cuda_graph, flipped_schedule (dup at end)
 
   std::vector<int64_t> ToVector() const {
     std::vector<int64_t> vec;
@@ -1097,10 +1106,16 @@ struct HolisticPlanInfo {
       vec.push_back(dyn[i].kv_len_offset);
       vec.push_back(dyn[i].num_m_blocks_offset);
       vec.push_back(dyn[i].nheads_in_l2_offset);
+      vec.push_back(dyn[i].partial_o_offset_offset);
       vec.push_back(dyn[i].num_seqs);
       vec.push_back(dyn[i].total_tiles);
       vec.push_back(dyn[i].len_kv_chunk);
+      vec.push_back(dyn[i].uniform_num_m_blocks);
     }
+    vec.push_back(dyn_scalars_offset);
+    vec.push_back(enable_cuda_graph);
+    // flipped_schedule must be last — Python reads plan_info[-1] to auto-select kernel
+    vec.push_back(flipped_schedule);
     return vec;
   }
 
@@ -1145,10 +1160,15 @@ struct HolisticPlanInfo {
       dyn[i].kv_len_offset = vec[dyn_base + i * NUM_DYN_ARGS + 3];
       dyn[i].num_m_blocks_offset = vec[dyn_base + i * NUM_DYN_ARGS + 4];
       dyn[i].nheads_in_l2_offset = vec[dyn_base + i * NUM_DYN_ARGS + 5];
-      dyn[i].num_seqs = vec[dyn_base + i * NUM_DYN_ARGS + 6];
-      dyn[i].total_tiles = vec[dyn_base + i * NUM_DYN_ARGS + 7];
-      dyn[i].len_kv_chunk = vec[dyn_base + i * NUM_DYN_ARGS + 8];
+      dyn[i].partial_o_offset_offset = vec[dyn_base + i * NUM_DYN_ARGS + 6];
+      dyn[i].num_seqs = vec[dyn_base + i * NUM_DYN_ARGS + 7];
+      dyn[i].total_tiles = vec[dyn_base + i * NUM_DYN_ARGS + 8];
+      dyn[i].len_kv_chunk = vec[dyn_base + i * NUM_DYN_ARGS + 9];
+      dyn[i].uniform_num_m_blocks = vec[dyn_base + i * NUM_DYN_ARGS + 10];
     }
+    uint32_t extra_base = dyn_base + NUM_TASKS * NUM_DYN_ARGS;
+    dyn_scalars_offset = vec[extra_base + 0];
+    enable_cuda_graph = vec[extra_base + 1];
   }
 };
 
@@ -1160,7 +1180,8 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
                                         IdType* kv_indptr_h, IdType* kv_len_arr_h,
                                         uint32_t batch_size, uint32_t num_qo_heads,
                                         uint32_t num_kv_heads, uint32_t head_dim,
-                                        uint32_t page_size, bool causal, cudaStream_t stream) {
+                                        uint32_t page_size, bool causal, cudaStream_t stream,
+                                        bool enable_cuda_graph = false) {
   constexpr uint32_t NUM_TASKS = 2;
   const uint32_t CTA_TILE_Q_SIZES[NUM_TASKS] = {128, 16};
   int num_sm = 0;
@@ -1206,8 +1227,9 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
       idx_qo_kv_len_vec[1].push_back({i, qo_len, kv_len});
     }
   }
-  // Enable LPT + flipped schedule whenever we have both prefill and decode work
-  if (total_prefill_len > 0 && total_decode_len > 0) {
+  // Enable LPT + flipped schedule whenever we have both prefill and decode work.
+  // For CUDA graphs: always use LPT (the kernel binary is always flipped_schedule=True).
+  if (enable_cuda_graph || (total_prefill_len > 0 && total_decode_len > 0)) {
     plan_info.flipped_schedule = true;
   } else {
     plan_info.flipped_schedule = false;
@@ -1220,31 +1242,84 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
 
   AlignedAllocator int_allocator(int_buffer, int_workspace_size_in_bytes);
 
-  // Build dynamic scheduler per-sequence metadata when flipped_schedule is enabled
+  // Pre-compute kv_len_limit per task (needed for KV splitting check in dynamic scheduler)
+  auto f_kv_limit = [](int x) {
+    return x <= 128 ? 128 : ceil_div(x, 256) * 256;
+  };
+  int64_t total_kv_lens_all = 0;
+  for (uint32_t task = 0; task < NUM_TASKS; ++task) {
+    int cluster_tile_q = CTA_TILE_Q_SIZES[task] * cluster_size;
+    for (auto& [_, qo_len, kv_len] : idx_qo_kv_len_vec[task]) {
+      int packed_qo_len = qo_len * gqa_group_size;
+      int num_qo_tiles = ceil_div(packed_qo_len, cluster_tile_q);
+      for (int qo_tile_idx = num_qo_tiles - 1; qo_tile_idx >= 0; --qo_tile_idx) {
+        int effective_kv_len =
+            causal ? packed_causal_kv_end(qo_len, kv_len, qo_tile_idx, cluster_tile_q,
+                                          num_qo_tiles, gqa_group_size)
+                   : kv_len;
+        total_kv_lens_all += effective_kv_len;
+      }
+    }
+  }
+  std::vector<int> precomputed_kv_len_limits(NUM_TASKS, INT_MAX);
+  for (uint32_t task = 0; task < NUM_TASKS; ++task) {
+    int cluster_tile_q = CTA_TILE_Q_SIZES[task] * cluster_size;
+    int kv_len_limit = f_kv_limit(
+        std::max(ceil_div(total_kv_lens_all * (int64_t)num_kv_heads, (int64_t)num_clusters), 1L));
+    if (cluster_tile_q >= 64) {
+      kv_len_limit /= std::min(num_kv_heads, 2U);
+    }
+    precomputed_kv_len_limits[task] = kv_len_limit;
+  }
+
+  // Partial output tracking — shared between dynamic and static scheduler paths.
+  // Dynamic scheduler's split-KV may add entries before the static scheduler runs.
+  int partial_o_nnz = 0;
+  std::vector<IdType> merge_indptr, merge_o_indices;
+  merge_indptr.push_back(partial_o_nnz);
+
+  // L2 cache budget for head grouping (dynamic scheduler only)
+  int l2_cache_size = 0;
   if (plan_info.flipped_schedule) {
-    // Query L2 cache size
-    int l2_cache_size = 0;
     FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&l2_cache_size, cudaDevAttrL2CacheSize, dev_id));
-    // Use half of L2 for K+V cache (conservative, accounts for Q/O/other data)
-    int l2_budget = l2_cache_size / 2;
+  }
+  int l2_budget = l2_cache_size / 2;
 
-    for (uint32_t task = 0; task < NUM_TASKS; ++task) {
-      int tile_q = CTA_TILE_Q_SIZES[task] * cluster_size;
-      auto& seqs = idx_qo_kv_len_vec[task];
-      int num_seqs = seqs.size();
+  MinHeap cluster_cost_heap(num_clusters);
 
-      std::vector<IdType> dyn_qo_indptr_vec(num_seqs, 0);  // global Q buffer offset per seq
+  // NOTE(Zihao): adjust it later
+  const int max_total_num_works = 65536;
+  const int max_num_kv_splits =
+      4 * num_clusters * cluster_size * (CTA_TILE_Q_SIZES[0] + CTA_TILE_Q_SIZES[1]);
+
+  std::vector<IdType> num_expand_qo_len_vec;
+  std::vector<IdType> cluster_len_kv_chunk(NUM_TASKS, 0);
+
+  // Single loop over tasks.
+  // Dynamic scheduler (LPT) when flipped_schedule.
+  // Static scheduler always runs (CG may replay captured flipped=false kernel on any batch).
+  for (uint32_t task = 0; task < NUM_TASKS; ++task) {
+    int cluster_tile_q = CTA_TILE_Q_SIZES[task] * cluster_size;
+    int kv_len_limit = precomputed_kv_len_limits[task];
+    cluster_len_kv_chunk[task] = kv_len_limit;
+    auto& seqs = idx_qo_kv_len_vec[task];
+    int num_seqs = seqs.size();
+
+    if (plan_info.flipped_schedule) {
+      // ===== Dynamic scheduler (LPT): per-sequence metadata =====
+      std::vector<IdType> dyn_qo_indptr_vec(num_seqs, 0);
       std::vector<IdType> dyn_qo_len_vec(num_seqs, 0);
       std::vector<IdType> dyn_kv_indptr_vec(num_seqs, 0);
       std::vector<IdType> dyn_kv_len_vec(num_seqs, 0);
       std::vector<IdType> dyn_num_m_blocks_vec(num_seqs, 0);
       std::vector<IdType> dyn_nheads_in_l2_vec(num_seqs, 0);
+      std::vector<IdType> dyn_partial_o_offset_vec(num_seqs, 0);  // always 0 (no split-KV in dynamic)
       int total_tiles = 0;
 
       for (int s = 0; s < num_seqs; ++s) {
         auto [seq_idx, qo_len, kv_len] = seqs[s];
         int packed_qo_len = qo_len * gqa_group_size;
-        int num_m_blocks = ceil_div(packed_qo_len, tile_q);
+        int num_m_blocks = ceil_div(packed_qo_len, cluster_tile_q);
 
         dyn_qo_indptr_vec[s] = qo_indptr_h[seq_idx];
         dyn_qo_len_vec[s] = qo_len;
@@ -1252,30 +1327,42 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
         dyn_kv_len_vec[s] = kv_len;
         dyn_num_m_blocks_vec[s] = num_m_blocks;
 
-        // L2-aware head grouping: how many KV heads fit in L2 for this sequence?
-        // KV cache per head = kv_len * head_dim * 2 (K+V) * elem_size (2 for bf16/fp16)
-        int64_t kv_bytes_per_head = (int64_t)kv_len * head_dim * 2 * 2;  // K+V, bf16
+        // L2-aware head grouping
+        int64_t kv_bytes_per_head = (int64_t)kv_len * head_dim * 2 * 2;
         int nheads_in_l2;
         if (kv_bytes_per_head == 0 || l2_budget >= kv_bytes_per_head * num_kv_heads) {
           nheads_in_l2 = num_kv_heads;
         } else {
           nheads_in_l2 = std::max(1, (int)(l2_budget / kv_bytes_per_head));
-          // Round down to power of 2 for efficient division
           nheads_in_l2 = 1 << (31 - __builtin_clz(nheads_in_l2));
         }
         nheads_in_l2 = std::min(nheads_in_l2, (int)num_kv_heads);
         dyn_nheads_in_l2_vec[s] = nheads_in_l2;
 
         total_tiles += num_m_blocks * num_kv_heads;
+
+        // NOTE: Dynamic scheduler does NOT split KV across tiles.
+        // Each tile processes the full KV range (kv_start=0, kv_end=kv_len).
+        // The kernel accumulates over all KV in one pass, so kv_chunk_idx is always 0.
+        // Split-KV partial output addressing requires per-tile kv_start (like the static scheduler).
+        // To support split-KV with LPT, we'd need to encode (seq, head, chunk) in the tile layout.
       }
+
       plan_info.dyn[task].num_seqs = num_seqs;
       plan_info.dyn[task].total_tiles = total_tiles;
-      // For dynamic scheduler: disable KV splitting by setting chunk size to max
-      // (KV splitting with dynamic scheduler is not yet implemented — partial_o_offset is always 0)
+      // Dynamic scheduler processes full KV range per tile — no KV splitting.
+      // Set len_kv_chunk = INT_MAX so kernel always sees num_kv_chunks=1 → write-through.
       plan_info.dyn[task].len_kv_chunk = INT_MAX;
+      bool all_uniform = (num_seqs > 0);
+      for (int s = 1; s < num_seqs && all_uniform; ++s) {
+        all_uniform = (dyn_num_m_blocks_vec[s] == dyn_num_m_blocks_vec[0]);
+      }
+      plan_info.dyn[task].uniform_num_m_blocks =
+          all_uniform ? (num_seqs > 0 ? dyn_num_m_blocks_vec[0] : 0) : 0;
 
-      // Allocate and copy per-sequence metadata to device
-      int alloc_seqs = std::max(num_seqs, 1);
+      // Allocate and copy per-sequence metadata to device.
+      // For CG, allocate for batch_size so offsets are invariant across replays.
+      int alloc_seqs = enable_cuda_graph ? std::max((int)batch_size, 1) : std::max(num_seqs, 1);
       plan_info.dyn[task].qo_indptr_offset =
           int_allocator.aligned_alloc_offset(sizeof(IdType) * alloc_seqs, 16, "dyn_qo_indptr");
       plan_info.dyn[task].kv_indptr_offset =
@@ -1286,7 +1373,8 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
           int_allocator.aligned_alloc_offset(sizeof(IdType) * alloc_seqs, 16, "dyn_num_m_blocks");
       plan_info.dyn[task].nheads_in_l2_offset =
           int_allocator.aligned_alloc_offset(sizeof(IdType) * alloc_seqs, 16, "dyn_nheads_in_l2");
-
+      plan_info.dyn[task].partial_o_offset_offset =
+          int_allocator.aligned_alloc_offset(sizeof(IdType) * alloc_seqs, 16, "dyn_partial_o_offset");
       plan_info.dyn[task].qo_len_offset =
           int_allocator.aligned_alloc_offset(sizeof(IdType) * alloc_seqs, 16, "dyn_qo_len");
 
@@ -1297,11 +1385,24 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
         CopyToPageLockedBuffer(page_locked_int_buffer, plan_info.dyn[task].kv_len_offset, dyn_kv_len_vec);
         CopyToPageLockedBuffer(page_locked_int_buffer, plan_info.dyn[task].num_m_blocks_offset, dyn_num_m_blocks_vec);
         CopyToPageLockedBuffer(page_locked_int_buffer, plan_info.dyn[task].nheads_in_l2_offset, dyn_nheads_in_l2_vec);
+        CopyToPageLockedBuffer(page_locked_int_buffer, plan_info.dyn[task].partial_o_offset_offset, dyn_partial_o_offset_vec);
       }
-    }
-  } else {
-    // Disable dynamic scheduler
-    for (uint32_t task = 0; task < NUM_TASKS; ++task) {
+
+      // Static work tiles unused when dynamic path is active.
+      // Set offsets to 0 so plan_info serialization doesn't have garbage values.
+      plan_info.total_num_works[task] = 0;
+      plan_info.tasks[task].q_indptr_offset = 0;
+      plan_info.tasks[task].kv_indptr_offset = 0;
+      plan_info.tasks[task].partial_indptr_offset = 0;
+      plan_info.tasks[task].q_len_offset = 0;
+      plan_info.tasks[task].kv_len_offset = 0;
+      plan_info.tasks[task].q_start_offset = 0;
+      plan_info.tasks[task].kv_start_offset = 0;
+      plan_info.tasks[task].kv_end_offset = 0;
+      plan_info.tasks[task].kv_head_idx_offset = 0;
+      plan_info.tasks[task].work_indptr_offset = 0;
+    } else {
+      // ===== Static scheduler (MinHeap): work tile generation =====
       plan_info.dyn[task].num_seqs = 0;
       plan_info.dyn[task].total_tiles = 0;
       plan_info.dyn[task].len_kv_chunk = 0;
@@ -1311,57 +1412,9 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
       plan_info.dyn[task].kv_len_offset = 0;
       plan_info.dyn[task].num_m_blocks_offset = 0;
       plan_info.dyn[task].nheads_in_l2_offset = 0;
-    }
-  }
+      plan_info.dyn[task].partial_o_offset_offset = 0;
+      plan_info.dyn[task].uniform_num_m_blocks = 0;
 
-  auto f = [](int x) {
-    if (x <= 128) {
-      // This aligns with CTA_TILE_KV in persistent mainloop
-      // NOTE (Yilong): Optimize here for smaller batch/seqlen scenarios
-      return 128;
-    }
-    return ceil_div(x, 256) * 256;
-  };
-
-  MinHeap cluster_cost_heap(num_clusters);
-
-  // NOTE(Zihao): adjust it later
-  const int max_total_num_works = 65536;
-  const int max_num_kv_splits =
-      4 * num_clusters * cluster_size * (CTA_TILE_Q_SIZES[0] + CTA_TILE_Q_SIZES[1]);
-
-  // calculate kv_len_limit first, considering all workloads
-  int64_t total_kv_lens = 0;
-  for (uint32_t task = 0; task < NUM_TASKS; ++task) {
-    int cluster_tile_q = CTA_TILE_Q_SIZES[task] * cluster_size;
-    for (auto& [_, qo_len, kv_len] : idx_qo_kv_len_vec[task]) {
-      int packed_qo_len = qo_len * gqa_group_size;
-      int num_qo_tiles = ceil_div(packed_qo_len, cluster_tile_q);
-      for (int qo_tile_idx = num_qo_tiles - 1; qo_tile_idx >= 0; --qo_tile_idx) {
-        int effective_kv_len =
-            causal ? packed_causal_kv_end(qo_len, kv_len, qo_tile_idx, cluster_tile_q, num_qo_tiles,
-                                          gqa_group_size)
-                   : kv_len;
-        total_kv_lens += effective_kv_len;
-      }
-    }
-  }
-
-  // used for remapping the output offsets
-  // layout [packed_qo_len x num_kv_tiles, num_kv_heads, head_dim]
-  int partial_o_nnz = 0;
-  std::vector<IdType> merge_indptr, merge_o_indices, num_expand_qo_len_vec;
-  std::vector<IdType> cluster_len_kv_chunk(NUM_TASKS, 0);
-  merge_indptr.push_back(partial_o_nnz);
-  for (uint32_t task = 0; task < NUM_TASKS; ++task) {
-    int cluster_tile_q = CTA_TILE_Q_SIZES[task] * cluster_size;
-    int kv_len_limit = f(std::max(ceil_div(total_kv_lens * num_kv_heads, num_clusters), 1L));
-    if (cluster_tile_q >= 64) {
-      // chunked-prefill workloads are much more expensive than decode
-      // so we use a smaller kv_len_limit for chunked-prefill workloads
-      kv_len_limit /= std::min(num_kv_heads, 2U);
-    }
-    cluster_len_kv_chunk[task] = kv_len_limit;
     std::vector<std::vector<IdType>> cluster_q_indptr(num_clusters, std::vector<IdType>()),
         cluster_kv_indptr(num_clusters, std::vector<IdType>()),
         cluster_q_len(num_clusters, std::vector<IdType>()),
@@ -1416,8 +1469,6 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
           // non-split kv is directly written through
           for (int row = 0; row < row_tile_size; ++row) {
             merge_indptr.push_back(merge_indptr.back() + num_kv_tiles);
-            // output layout: [qo_len, num_kv_heads, gqa_group_size, head_dim]
-            // merge_o_indices is the indices of `gqa_group_size` dimension
             auto q = (qo_tile_idx * cluster_tile_q + row) / gqa_group_size,
                  r = (qo_tile_idx * cluster_tile_q + row) % gqa_group_size;
             merge_o_indices.push_back((qo_indptr_h[i] + q) * num_kv_heads * gqa_group_size + r);
@@ -1515,7 +1566,8 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
                            kv_head_idx_vec);
     CopyToPageLockedBuffer(page_locked_int_buffer, plan_info.tasks[task].work_indptr_offset,
                            work_indptr_vec);
-  }
+    } // end if/else dynamic/static
+  } // end for task
   plan_info.len_kv_chunk_offset =
       int_allocator.aligned_alloc_offset(sizeof(IdType) * NUM_TASKS, 16, "len_kv_chunk");
   CopyToPageLockedBuffer(page_locked_int_buffer, plan_info.len_kv_chunk_offset,
@@ -1548,6 +1600,23 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
       int_allocator.aligned_alloc_offset(sizeof(IdType) * NUM_TASKS, 16, "tile_counter");
   std::vector<IdType> tile_counter_init(NUM_TASKS, 0);
   CopyToPageLockedBuffer(page_locked_int_buffer, plan_info.tile_counter_offset, tile_counter_init);
+
+  // Allocate dynamic scheduler scalars buffer (4 ints per task):
+  // [num_seqs, total_tiles, len_kv_chunk, uniform_num_m_blocks] per task.
+  // When enable_cuda_graph, the kernel reads these from the buffer (updatable per replay)
+  // instead of from frozen plan_info params.
+  constexpr int DYN_SCALARS_PER_TASK = 4;
+  plan_info.dyn_scalars_offset = int_allocator.aligned_alloc_offset(
+      sizeof(IdType) * NUM_TASKS * DYN_SCALARS_PER_TASK, 16, "dyn_scalars");
+  plan_info.enable_cuda_graph = enable_cuda_graph;
+  std::vector<IdType> dyn_scalars_vec(NUM_TASKS * DYN_SCALARS_PER_TASK);
+  for (uint32_t t = 0; t < NUM_TASKS; ++t) {
+    dyn_scalars_vec[t * DYN_SCALARS_PER_TASK + 0] = plan_info.dyn[t].num_seqs;
+    dyn_scalars_vec[t * DYN_SCALARS_PER_TASK + 1] = plan_info.dyn[t].total_tiles;
+    dyn_scalars_vec[t * DYN_SCALARS_PER_TASK + 2] = plan_info.dyn[t].len_kv_chunk;
+    dyn_scalars_vec[t * DYN_SCALARS_PER_TASK + 3] = plan_info.dyn[t].uniform_num_m_blocks;
+  }
+  CopyToPageLockedBuffer(page_locked_int_buffer, plan_info.dyn_scalars_offset, dyn_scalars_vec);
 
   size_t num_bytes_to_copy = int_allocator.num_allocated_bytes();
   FLASHINFER_CUDA_CALL(cudaMemcpyAsync(int_buffer, page_locked_int_buffer, num_bytes_to_copy,

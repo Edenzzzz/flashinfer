@@ -69,13 +69,20 @@ __device__ __forceinline__ int warp_prefix_sum(int value) {
  *                    packed_qo_start, kv_start, kv_end, kv_head_idx, len_kv_chunk)
  * matching get_block_coord() signature, plus updated (bidb, group_start_tile).
  */
-template <uint32_t CTA_TILE_Q, typename Params, typename IdType>
+// Helper: read dynamic scheduler scalar from GPU buffer (CUDA graph) or frozen param.
+// dyn_scalars layout per task: [num_seqs, total_tiles, len_kv_chunk, uniform_num_m_blocks]
+template <typename Params, typename IdType>
+__device__ __forceinline__ int dyn_scalar(const Params& params, int idx, int frozen_val) {
+  return params.dyn_scalars ? params.dyn_scalars[idx] : frozen_val;
+}
+
+template <uint32_t CTA_TILE_Q, bool CAUSAL, typename Params, typename IdType>
 __device__ __forceinline__ auto tile_idx_to_work_tile(
     const Params& params, int tile_idx, int prev_bidb, int prev_group_start) {
 
   const uint32_t num_kv_heads = params.num_kv_heads;
   const uint_fastdiv& gqa_group_size = params.gqa_group_size;
-  const int uniform_m = params.dyn_uniform_num_m_blocks;
+  const int uniform_m = dyn_scalar<Params, IdType>(params, 3, params.dyn_uniform_num_m_blocks);
 
   int bidb, num_m_blocks, mh_block, group_start_tile;
 
@@ -91,10 +98,11 @@ __device__ __forceinline__ auto tile_idx_to_work_tile(
   } else {
     // --- General path: warp-level binary search for sequence ---
     const int lane = threadIdx.x % 32;
+    const int dyn_ns = dyn_scalar<Params, IdType>(params, 0, params.dyn_num_seqs);
 
     auto get_num_tiles = [&](int seq_start) -> int {
       int seq_idx = lane + seq_start;
-      if (seq_idx < params.dyn_num_seqs && lane < 31) {
+      if (seq_idx < dyn_ns && lane < 31) {
         return params.dyn_num_m_blocks[seq_idx];
       }
       return 0;
@@ -108,10 +116,10 @@ __device__ __forceinline__ auto tile_idx_to_work_tile(
 
     while (group_end_tile <= tile_idx) {
       bidb += 31;
-      if (bidb >= params.dyn_num_seqs) {
+      if (bidb >= dyn_ns) {
         return std::tuple((IdType)0, (IdType)0, (IdType)0, (IdType)0, (IdType)0,
                           (IdType)0, (IdType)0, (IdType)0, (IdType)0,
-                          params.dyn_len_kv_chunk, bidb, group_end_tile);
+                          dyn_scalar<Params, IdType>(params, 2, params.dyn_len_kv_chunk), bidb, group_end_tile);
       }
       num_tiles = get_num_tiles(bidb);
       num_tiles_cumulative = warp_prefix_sum(num_tiles);
@@ -150,8 +158,20 @@ __device__ __forceinline__ auto tile_idx_to_work_tile(
   int kv_len = params.dyn_kv_len[bidb];
 
   int kv_start = 0;
-  int kv_end = kv_len;
-  int partial_o_offset = 0;
+  // Clamp kv_end for causal: avoid processing KV tiles beyond the causal boundary.
+  // Without this, tiles where effective_kv=0 (kv_len < q_len) process unnecessary KV,
+  // producing different floating-point results from the static scheduler (which clips kv_end to 0).
+  int kv_end;
+  if constexpr (CAUSAL) {
+    uint32_t gqa_group_size = params.gqa_group_size;
+    int causal_kv_end = (int)kv_len - (int)qo_len +
+        (int)ceil_div((uint32_t)packed_qo_start + CTA_TILE_Q, gqa_group_size);
+    kv_end = max(0, min(kv_len, causal_kv_end));
+  } else {
+    kv_end = kv_len;
+  }
+  // For split KV: use per-sequence partial_o_offset from planner
+  int partial_o_offset = params.dyn_partial_o_offset ? params.dyn_partial_o_offset[bidb] : 0;
 
   return std::tuple(
       (IdType)params.dyn_qo_indptr[bidb],
@@ -163,7 +183,7 @@ __device__ __forceinline__ auto tile_idx_to_work_tile(
       (IdType)kv_start,
       (IdType)kv_end,
       (IdType)kv_head_idx,
-      params.dyn_len_kv_chunk,
+      dyn_scalar<Params, IdType>(params, 2, params.dyn_len_kv_chunk),
       bidb,
       group_start_tile
   );
@@ -388,8 +408,9 @@ struct BlockBatchPagedAttentionPersistent {
                  lane_idx % KTraits::KV_THR_LAYOUT_COL);
     size_t thr_local_kv_offset[NUM_MMA_KV * KTraits::KV_THR_LAYOUT_COL / 2 / KTraits::NUM_WARPS_Q];
 
-    // Choose scheduling mode
-    const bool use_dynamic = (params.dyn_num_seqs > 0);
+    // Choose scheduling mode: read from GPU buffer for CUDA graph, else from frozen param
+    const int eff_dyn_num_seqs = dyn_scalar<Params, IdType>(params, 0, params.dyn_num_seqs);
+    const bool use_dynamic = (eff_dyn_num_seqs > 0);
 
     // Dynamic scheduler state (for tile_idx_to_work_tile warm start)
     int dyn_bidb = 0, dyn_group_start = 0;
@@ -413,10 +434,10 @@ struct BlockBatchPagedAttentionPersistent {
         }
         __syncthreads();
         tile_idx = reinterpret_cast<volatile IdType*>(smem_storage)[0];
-        if (tile_idx >= params.dyn_total_tiles) break;
+        if (tile_idx >= dyn_scalar<Params, IdType>(params, 1, params.dyn_total_tiles)) break;
 
         // Map tile_idx to work coordinates
-        auto result = tile_idx_to_work_tile<CTA_TILE_Q, Params, IdType>(
+        auto result = tile_idx_to_work_tile<CTA_TILE_Q, CAUSAL, Params, IdType>(
             params, tile_idx, dyn_bidb, dyn_group_start);
         q_indptr_val = std::get<0>(result);
         kv_indptr_val = std::get<1>(result);
@@ -430,8 +451,9 @@ struct BlockBatchPagedAttentionPersistent {
         len_kv_chunk = std::get<9>(result);
         dyn_bidb = std::get<10>(result);
         dyn_group_start = std::get<11>(result);
+        // tile mapping complete
         // Check for sentinel (past end of sequences)
-        if (dyn_bidb >= params.dyn_num_seqs) break;
+        if (dyn_bidb >= eff_dyn_num_seqs) break;
       } else {
         // Static scheduling: iterate work_indptr range
         if (work_idx >= work_indptr[blockIdx.y + 1]) break;

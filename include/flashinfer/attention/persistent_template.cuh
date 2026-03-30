@@ -31,6 +31,7 @@ enum class PersistentProfileEventType {
   kRunner1 = 0U,
   kRunner2 = 1U,
   kReduction = 2U,
+  kGridSync = 3U,
 };
 
 struct ProfilerClosure {
@@ -119,7 +120,9 @@ __global__ __launch_bounds__(
     BlockPersistentRunner1::Run(params_1, &smem_storage_1, profiler_closure);
     BlockPersistentRunner2::Run(params_2, &smem_storage_2, profiler_closure);
   }
+  PROFILER_EVENT_START(profiler_closure, PersistentProfileEventType::kGridSync);
   grid.sync();
+  PROFILER_EVENT_END(profiler_closure, PersistentProfileEventType::kGridSync);
   BlockReductionRunner::Run(params_1.partial_o, params_1.final_o, params_1.partial_lse,
                             params_1.final_lse, *(params_1.num_packed_qo_len),
                             params_1.gqa_group_size, params_1.num_kv_heads, params_1.merge_indptr,

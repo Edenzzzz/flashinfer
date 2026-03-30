@@ -109,8 +109,12 @@ struct PersistentParams {
   IdType* dyn_kv_len;              // [num_seqs] KV length per sequence
   IdType* dyn_num_m_blocks;        // [num_seqs] Q tiles per sequence = ceil_div(packed_qo_len, CTA_TILE_Q)
   IdType* dyn_nheads_in_l2;        // [num_seqs] number of heads fitting in L2 per sequence
+  IdType* dyn_partial_o_offset;    // [num_seqs] base offset into partial_o buffer per sequence
   int32_t dyn_total_tiles;         // total tiles across all sequences (for bounds check)
   int32_t dyn_len_kv_chunk;        // KV chunk size limit for this task
+  int32_t dyn_uniform_num_m_blocks; // >0 if all seqs have same num_m_blocks (fast O(1) lookup)
+  IdType* dyn_scalars;             // [4] GPU buffer: {num_seqs, total_tiles, len_kv_chunk, uniform_num_m_blocks}
+                                   // When non-null (CUDA graph mode), kernel reads from this instead of frozen scalars
 
   uint32_t num_kv_heads;
   uint_fastdiv gqa_group_size;

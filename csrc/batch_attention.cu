@@ -44,7 +44,7 @@ Array<int64_t> BatchPagedAttentionPlan(TensorView float_workspace_buffer,
                                        TensorView qo_indptr, TensorView kv_indptr,
                                        TensorView kv_len, int64_t batch_size, int64_t num_qo_heads,
                                        int64_t num_kv_heads, int64_t head_dim_o, int64_t page_size,
-                                       bool causal) {
+                                       bool causal, bool enable_cuda_graph) {
   size_t float_workspace_size_in_bytes =
       float_workspace_buffer.size(0) * get_element_size(float_workspace_buffer);
   size_t int_workspace_size_in_bytes =
@@ -60,7 +60,8 @@ Array<int64_t> BatchPagedAttentionPlan(TensorView float_workspace_buffer,
       int_workspace_buffer.data_ptr(), page_locked_int_workspace_buffer.data_ptr(),
       int_workspace_size_in_bytes, plan_info, static_cast<IdType*>(qo_indptr.data_ptr()),
       static_cast<IdType*>(kv_indptr.data_ptr()), static_cast<IdType*>(kv_len.data_ptr()),
-      batch_size, num_qo_heads, num_kv_heads, head_dim_o, page_size, causal, stream);
+      batch_size, num_qo_heads, num_kv_heads, head_dim_o, page_size, causal, stream,
+      enable_cuda_graph);
 
   TVM_FFI_ICHECK(status == cudaSuccess)
       << "Failed to plan persistent paged attention, error: " << cudaGetErrorString(status);
@@ -79,6 +80,14 @@ void BatchPagedAttentionRun(TensorView float_workspace_buffer, TensorView int_wo
                             double logits_soft_cap ADDITIONAL_FUNC_PARAMS PROFILER_FUNC_PARAMS) {
   HolisticPlanInfo<2> plan_info;
   plan_info.FromVector(std::vector<int64_t>(plan_info_vec.begin(), plan_info_vec.end()));
+
+  static int run_count = 0;
+  run_count++;
+  if (run_count <= 5 || (plan_info.enable_cuda_graph && run_count <= 50)) {
+    fprintf(stderr, "[DEBUG Run] count=%d enable_cg=%d flipped=%d dyn0_ns=%d dyn1_ns=%d\n",
+            run_count, (int)plan_info.enable_cuda_graph, (int)plan_info.flipped_schedule,
+            plan_info.dyn[0].num_seqs, plan_info.dyn[1].num_seqs);
+  }
 
   void* float_buffer_ptr = float_workspace_buffer.data_ptr();
   void* int_buffer_ptr = int_workspace_buffer.data_ptr();
@@ -187,6 +196,14 @@ void BatchPagedAttentionRun(TensorView float_workspace_buffer, TensorView int_wo
           }
 
           // Dynamic scheduler (v3 FA3-style)
+          // dyn_scalars: for CG, kernel reads scalars from GPU buffer (updatable per replay)
+          constexpr int DYN_SCALARS_PER_TASK = 4;
+          if (plan_info.flipped_schedule && plan_info.enable_cuda_graph) {
+            params[i].dyn_scalars = GetPtrFromBaseOffset<IdType>(
+                int_buffer_ptr, plan_info.dyn_scalars_offset) + i * DYN_SCALARS_PER_TASK;
+          } else {
+            params[i].dyn_scalars = nullptr;
+          }
           if (plan_info.flipped_schedule && plan_info.dyn[i].num_seqs > 0) {
             params[i].dyn_num_seqs = plan_info.dyn[i].num_seqs;
             params[i].dyn_qo_indptr =
@@ -201,8 +218,11 @@ void BatchPagedAttentionRun(TensorView float_workspace_buffer, TensorView int_wo
                 GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.dyn[i].num_m_blocks_offset);
             params[i].dyn_nheads_in_l2 =
                 GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.dyn[i].nheads_in_l2_offset);
+            params[i].dyn_partial_o_offset =
+                GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.dyn[i].partial_o_offset_offset);
             params[i].dyn_total_tiles = plan_info.dyn[i].total_tiles;
             params[i].dyn_len_kv_chunk = plan_info.dyn[i].len_kv_chunk;
+            params[i].dyn_uniform_num_m_blocks = plan_info.dyn[i].uniform_num_m_blocks;
           } else {
             params[i].dyn_num_seqs = 0;
             params[i].dyn_qo_indptr = nullptr;
@@ -211,8 +231,10 @@ void BatchPagedAttentionRun(TensorView float_workspace_buffer, TensorView int_wo
             params[i].dyn_kv_len = nullptr;
             params[i].dyn_num_m_blocks = nullptr;
             params[i].dyn_nheads_in_l2 = nullptr;
+            params[i].dyn_partial_o_offset = nullptr;
             params[i].dyn_total_tiles = 0;
             params[i].dyn_len_kv_chunk = 0;
+            params[i].dyn_uniform_num_m_blocks = 0;
           }
           // NOTE(Wenxuan) directly using the additional_params_decl from generate_additional_params
           // will be problematic because of the params[i]
@@ -220,7 +242,7 @@ void BatchPagedAttentionRun(TensorView float_workspace_buffer, TensorView int_wo
           PROFILER_PARAMS_SETTER
         }
 
-        // Reset tile counters before launch (for LPT runtime fetching)
+        // Reset tile counters before launch (for LPT runtime fetching).
         if (plan_info.flipped_schedule) {
           IdType* tile_counters =
               GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.tile_counter_offset);

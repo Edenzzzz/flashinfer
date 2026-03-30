@@ -134,7 +134,12 @@ class BatchAttention:
         self._logits_soft_cap = logits_soft_cap
 
         # get jit module
-        schedule_placeholder = True if flipped_schedule is None else flipped_schedule
+        # For CUDA graphs: always use flipped_schedule=True kernel so LPT is
+        # available for any batch composition at replay time.
+        if self._use_cuda_graph:
+            schedule_placeholder = True
+        else:
+            schedule_placeholder = True if flipped_schedule is None else flipped_schedule
         get_module_args = [
             q_data_type,
             kv_data_type,
@@ -176,6 +181,9 @@ class BatchAttention:
                 )
             self._qo_indptr_buf.copy_(qo_indptr, non_blocking=True)
             self._paged_kv_indptr_buf.copy_(kv_indptr, non_blocking=True)
+            self._paged_kv_indices_buf[:len(kv_indices)].copy_(
+                kv_indices.to(self.device), non_blocking=True
+            )
             self._kv_len_arr_buf.copy_(kv_len_arr, non_blocking=True)
         else:
             # No addtional buf allocated for CUDA graph tensor
@@ -202,9 +210,12 @@ class BatchAttention:
             head_dim_vo,
             page_size,
             causal,
+            self._use_cuda_graph,
         )
         recommended_schedule = bool(self._plan_info[-1])
-        if recommended_schedule != schedule_placeholder and flipped_schedule is None:
+        # For CG: plan always returns flipped_schedule=True (forced in C++ plan).
+        # For non-CG: auto-switch kernel binary if needed.
+        if recommended_schedule != schedule_placeholder and flipped_schedule is None and not self._use_cuda_graph:
             get_module_args[-1] = recommended_schedule
             self.module = get_holistic_attention_module(*get_module_args)
 
