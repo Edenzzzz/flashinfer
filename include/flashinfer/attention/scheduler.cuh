@@ -1324,10 +1324,10 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
         auto [seq_idx, qo_len, kv_len] = seqs[s];
         int packed_qo_len = qo_len * gqa_group_size;
         int num_m_blocks = ceil_div(packed_qo_len, cluster_tile_q);
-        // Split-KV: only for decode (single q_block). For causal prefill, different
-        // q_blocks see different effective KV — the reduction would read uninitialized
-        // partial outputs for chunks beyond the causal boundary.
-        bool can_split = (num_m_blocks == 1);  // decode: 1 q_block
+        // Split-KV: only for decode (single q_block). Prefill split causes
+        // cooperative kernel hang (too many tiles or warp search issue).
+        // TODO: investigate and enable prefill split-KV.
+        bool can_split = (num_m_blocks == 1);
         int num_kv_chunks = can_split ? std::max(1, ceil_div((int)kv_len, kv_len_limit)) : 1;
 
         dyn_qo_indptr_vec[s] = qo_indptr_h[seq_idx];
@@ -1374,8 +1374,6 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
 
       plan_info.dyn[task].num_seqs = num_seqs;
       plan_info.dyn[task].total_tiles = total_tiles;
-      // For prefill: no split-KV, set len_kv_chunk large so kernel sees num_kv_chunks=1.
-      // For decode: use actual kv_len_limit for split-KV.
       bool any_split = false;
       for (int s = 0; s < num_seqs && !any_split; ++s) any_split = (dyn_num_kv_chunks_vec[s] > 1);
       plan_info.dyn[task].len_kv_chunk = any_split ? kv_len_limit : INT_MAX;
