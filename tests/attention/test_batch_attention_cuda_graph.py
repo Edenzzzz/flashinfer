@@ -360,7 +360,8 @@ def test_dynamic_scheduler_correctness():
         ("pure_decode_uniform", [1]*16, [100]*16),
         ("pure_decode_varying", [1]*16, [100+i*10 for i in range(16)]),
         ("decode_split_kv", [1, 128], [256, 50]),    # decode kv=256 > limit=128 → split
-        ("prefill_split_kv", [1, 128, 128], [50, 100, 100]),  # prefill kv=100 > limit=64
+        ("prefill_split_kv", [1, 128, 128], [50, 100, 100]),  # prefill kv<q_len → no split
+        ("prefill_split_kv_large", [1, 128, 128], [50, 300, 300]),  # prefill kv>q_len → split
         ("mixed_large", [1]*10 + [128]*2,
          [2048+i*5 for i in range(10)] + [100]*2),
     ]
