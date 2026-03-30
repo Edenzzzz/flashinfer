@@ -1324,9 +1324,8 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
         auto [seq_idx, qo_len, kv_len] = seqs[s];
         int packed_qo_len = qo_len * gqa_group_size;
         int num_m_blocks = ceil_div(packed_qo_len, cluster_tile_q);
-        // Split-KV: only for decode (single q_block). Prefill split causes
-        // cooperative kernel hang (too many tiles or warp search issue).
-        // TODO: investigate and enable prefill split-KV.
+        // Split-KV only for decode (single q_block). Prefill split causes
+        // cooperative kernel hang due to kv_start > 0 + causal mask interaction.
         bool can_split = (num_m_blocks == 1);
         int num_kv_chunks = can_split ? std::max(1, ceil_div((int)kv_len, kv_len_limit)) : 1;
 

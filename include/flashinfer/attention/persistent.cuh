@@ -174,10 +174,10 @@ __device__ __forceinline__ auto tile_idx_to_work_tile(
   // Split-KV: compute kv_start/kv_end for this chunk.
   int kv_start = chunk_idx * len_kv_chunk_val;
   int kv_end = min((int)kv_len, kv_start + len_kv_chunk_val);
-  // For non-split tiles: clamp kv_end to the causal boundary of this q_block.
-  // This avoids processing unnecessary KV tiles and matches the static scheduler.
-  // For split tiles: don't clamp — the kernel must load the full chunk range
-  // so rows near the end of the tile can attend to KV tokens in this chunk.
+  // For non-split tiles (num_kv_chunks=1): clamp kv_end for causal to avoid
+  // processing unnecessary KV and match the static scheduler's behavior.
+  // For split tiles: the kernel must process each chunk's KV range fully.
+  // NOTE: Prefill split-KV is disabled in the planner (num_m_blocks==1 check).
   if constexpr (CAUSAL) {
     if (num_kv_chunks <= 1) {
       uint32_t gqa_gs = params.gqa_group_size;
@@ -452,7 +452,8 @@ struct BlockBatchPagedAttentionPersistent {
         }
         __syncthreads();
         tile_idx = reinterpret_cast<volatile IdType*>(smem_storage)[0];
-        if (tile_idx >= dyn_scalar<Params, IdType>(params, 1, params.dyn_total_tiles)) break;
+        int total_t = dyn_scalar<Params, IdType>(params, 1, params.dyn_total_tiles);
+        if (tile_idx >= total_t) break;
 
         // Map tile_idx to work coordinates
         auto result = tile_idx_to_work_tile<CTA_TILE_Q, CAUSAL, Params, IdType>(
@@ -685,6 +686,7 @@ struct BlockBatchPagedAttentionPersistent {
         ++work_idx;
       }
     }
+    // debug printf removed
   }
 };
 
