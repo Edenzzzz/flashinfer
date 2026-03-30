@@ -1181,7 +1181,8 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
                                         uint32_t batch_size, uint32_t num_qo_heads,
                                         uint32_t num_kv_heads, uint32_t head_dim,
                                         uint32_t page_size, bool causal, cudaStream_t stream,
-                                        bool enable_cuda_graph = false) {
+                                        bool enable_cuda_graph = false,
+                                        int64_t alloc_batch_size = 0) {
   constexpr uint32_t NUM_TASKS = 2;
   const uint32_t CTA_TILE_Q_SIZES[NUM_TASKS] = {128, 16};
   int num_sm = 0;
@@ -1362,7 +1363,8 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
 
       // Allocate and copy per-sequence metadata to device.
       // For CG, allocate for batch_size so offsets are invariant across replays.
-      int alloc_seqs = enable_cuda_graph ? std::max((int)batch_size, 1) : std::max(num_seqs, 1);
+      int cg_alloc_bs = (alloc_batch_size > 0) ? (int)alloc_batch_size : (int)batch_size;
+      int alloc_seqs = enable_cuda_graph ? std::max(cg_alloc_bs, 1) : std::max(num_seqs, 1);
       plan_info.dyn[task].qo_indptr_offset =
           int_allocator.aligned_alloc_offset(sizeof(IdType) * alloc_seqs, 16, "dyn_qo_indptr");
       plan_info.dyn[task].kv_indptr_offset =

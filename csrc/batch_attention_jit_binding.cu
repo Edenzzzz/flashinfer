@@ -25,7 +25,8 @@ Array<int64_t> BatchPagedAttentionPlan(TensorView float_workspace_buffer,
                                        TensorView qo_indptr, TensorView kv_indptr,
                                        TensorView kv_len, int64_t batch_size, int64_t num_qo_heads,
                                        int64_t num_kv_heads, int64_t head_dim_o, int64_t page_size,
-                                       bool causal, bool enable_cuda_graph);
+                                       bool causal, bool enable_cuda_graph,
+                                       int64_t cuda_graph_max_bs);
 
 void BatchPagedAttentionRun(TensorView float_workspace_buffer, TensorView int_workspace_buffer,
                             Array<int64_t> plan_info_vec, TensorView q, TensorView k_cache,

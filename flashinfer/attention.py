@@ -128,6 +128,8 @@ class BatchAttention:
         kv_data_type: torch.dtype = torch.bfloat16,
         use_profiler: bool = False,
         flipped_schedule: bool = None,  # If None, auto-schedule based on prefill-decode ratio
+        enable_cuda_graph: bool = False,  # Force invariant workspace layout for CG capture/replay
+        cuda_graph_max_bs: int = 0,  # Max batch size for CG allocation (0 = use actual bs)
     ) -> None:
         if logits_soft_cap is None:
             logits_soft_cap = 0.0
@@ -197,6 +199,7 @@ class BatchAttention:
         kv_len_arr_host = kv_len_arr.to(torch.device("cpu"), non_blocking=True)
         torch.cuda.synchronize()
 
+        use_cg = self._use_cuda_graph or enable_cuda_graph
         self._plan_info = self.module.plan(
             self.float_workspace_buffer,
             self.int_workspace_buffer,
@@ -210,7 +213,8 @@ class BatchAttention:
             head_dim_vo,
             page_size,
             causal,
-            self._use_cuda_graph,
+            use_cg,
+            cuda_graph_max_bs,
         )
         recommended_schedule = bool(self._plan_info[-1])
         # For CG: plan always returns flipped_schedule=True (forced in C++ plan).

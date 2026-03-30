@@ -44,7 +44,8 @@ Array<int64_t> BatchPagedAttentionPlan(TensorView float_workspace_buffer,
                                        TensorView qo_indptr, TensorView kv_indptr,
                                        TensorView kv_len, int64_t batch_size, int64_t num_qo_heads,
                                        int64_t num_kv_heads, int64_t head_dim_o, int64_t page_size,
-                                       bool causal, bool enable_cuda_graph) {
+                                       bool causal, bool enable_cuda_graph,
+                                       int64_t cuda_graph_max_bs) {
   size_t float_workspace_size_in_bytes =
       float_workspace_buffer.size(0) * get_element_size(float_workspace_buffer);
   size_t int_workspace_size_in_bytes =
@@ -55,13 +56,17 @@ Array<int64_t> BatchPagedAttentionPlan(TensorView float_workspace_buffer,
   cudaSetDevice(float_workspace_buffer.device().device_id);
   const cudaStream_t stream = get_stream(float_workspace_buffer.device());
 
+  // For CG: use max_bs for allocation sizes to keep workspace layout invariant
+  int64_t alloc_batch_size = (enable_cuda_graph && cuda_graph_max_bs > 0)
+      ? cuda_graph_max_bs : batch_size;
+
   cudaError_t status = TwoStageHolisticPlan<IdType>(
       float_workspace_buffer.data_ptr(), float_workspace_size_in_bytes,
       int_workspace_buffer.data_ptr(), page_locked_int_workspace_buffer.data_ptr(),
       int_workspace_size_in_bytes, plan_info, static_cast<IdType*>(qo_indptr.data_ptr()),
       static_cast<IdType*>(kv_indptr.data_ptr()), static_cast<IdType*>(kv_len.data_ptr()),
       batch_size, num_qo_heads, num_kv_heads, head_dim_o, page_size, causal, stream,
-      enable_cuda_graph);
+      enable_cuda_graph, alloc_batch_size);
 
   TVM_FFI_ICHECK(status == cudaSuccess)
       << "Failed to plan persistent paged attention, error: " << cudaGetErrorString(status);
