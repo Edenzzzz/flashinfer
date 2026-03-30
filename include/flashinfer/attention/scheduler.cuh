@@ -1389,8 +1389,16 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
       }
 
       // Static work tiles unused when dynamic path is active.
-      // Set offsets to 0 so plan_info serialization doesn't have garbage values.
+      // Allocate a zero work_indptr so the static path (used as fallback when
+      // dyn_num_seqs=0 for a task) sees empty work and exits immediately.
       plan_info.total_num_works[task] = 0;
+      {
+        int64_t wi_off = int_allocator.aligned_alloc_offset(
+            sizeof(IdType) * (num_clusters + 1), 16, "dyn_dummy_work_indptr");
+        std::vector<IdType> zeros(num_clusters + 1, 0);
+        CopyToPageLockedBuffer(page_locked_int_buffer, wi_off, zeros);
+        plan_info.tasks[task].work_indptr_offset = wi_off;
+      }
       plan_info.tasks[task].q_indptr_offset = 0;
       plan_info.tasks[task].kv_indptr_offset = 0;
       plan_info.tasks[task].partial_indptr_offset = 0;
@@ -1400,7 +1408,6 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
       plan_info.tasks[task].kv_start_offset = 0;
       plan_info.tasks[task].kv_end_offset = 0;
       plan_info.tasks[task].kv_head_idx_offset = 0;
-      plan_info.tasks[task].work_indptr_offset = 0;
     } else {
       // ===== Static scheduler (MinHeap): work tile generation =====
       plan_info.dyn[task].num_seqs = 0;
