@@ -134,7 +134,8 @@ __device__ __forceinline__ auto tile_idx_to_work_tile(
     int batch_idx_in_group = __popc(__ballot_sync(0xffffffff,
         group_start_tile + num_tiles_cumulative * num_kv_heads <= tile_idx));
     bidb += batch_idx_in_group;
-    num_m_blocks = __shfl_sync(0xffffffff, num_tiles, batch_idx_in_group);
+    // Read actual num_m_blocks (not num_tiles which includes num_kv_chunks)
+    num_m_blocks = params.dyn_num_m_blocks[bidb];
     group_start_tile += (batch_idx_in_group == 0 ? 0 :
         __shfl_sync(0xffffffff, num_tiles_cumulative, batch_idx_in_group - 1)) * num_kv_heads;
     mh_block = tile_idx - group_start_tile;
