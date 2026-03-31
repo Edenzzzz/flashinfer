@@ -78,7 +78,8 @@ __device__ __forceinline__ int dyn_scalar(const Params& params, int idx, int fro
 
 template <uint32_t CTA_TILE_Q, bool CAUSAL, typename Params, typename IdType>
 __device__ __forceinline__ auto tile_idx_to_work_tile(
-    const Params& params, int tile_idx, int prev_bidb, int prev_group_start) {
+    const Params& params, int tile_idx, int prev_bidb, int prev_group_start,
+    bool split_kv_active) {
 
   const uint32_t num_kv_heads = params.num_kv_heads;
   const uint_fastdiv& gqa_group_size = params.gqa_group_size;
@@ -144,16 +145,26 @@ __device__ __forceinline__ auto tile_idx_to_work_tile(
 
   // --- Step 2: Map within-sequence tile to (q_block, head, chunk) ---
   int nheads_in_l2 = params.dyn_nheads_in_l2[bidb];
-  int kv_len_s = params.dyn_kv_len[bidb];
-  int len_kv_chunk_val = dyn_scalar<Params, IdType>(params, 2, params.dyn_len_kv_chunk);
   int block, kv_head_idx, chunk_idx;
 
-  // Fast path: no split (kv_len <= kv_limit) OR single q_tile (decode).
-  // Uses O(1) division — same as pre-split-KV code.
-  if (kv_len_s <= len_kv_chunk_val || num_m_blocks == 1) {
-    int nc = kv_len_s > len_kv_chunk_val ? ceil_div(kv_len_s, len_kv_chunk_val) : 1;
-    int mh = nc > 1 ? mh_block / nc : mh_block;
-    chunk_idx = nc > 1 ? mh_block - mh * nc : 0;
+  if (!split_kv_active) {
+    // No split-KV: identical to pre-split-KV code. Zero overhead.
+    chunk_idx = 0;
+    int mh_in_l2 = nheads_in_l2 * num_m_blocks;
+    int section_idx = mh_block / mh_in_l2;
+    int l2_mod = mh_block - section_idx * mh_in_l2;
+    int nhr = num_kv_heads - section_idx * nheads_in_l2;
+    int nhs = nheads_in_l2 <= nhr ? nheads_in_l2 : nhr;
+    block = l2_mod / nhs;
+    kv_head_idx = section_idx * nheads_in_l2 + (l2_mod - block * nhs);
+    block = num_m_blocks - 1 - block;
+  } else if (num_m_blocks == 1) {
+    // Decode with split-KV: O(1) uniform chunk mapping.
+    int kv_l = params.dyn_kv_len[bidb];
+    int kv_lim = dyn_scalar<Params, IdType>(params, 2, params.dyn_len_kv_chunk);
+    int nc = ceil_div(kv_l, kv_lim);
+    int mh = mh_block / nc;
+    chunk_idx = mh_block - mh * nc;
     int mh_in_l2 = nheads_in_l2 * num_m_blocks;
     int section_idx = mh / mh_in_l2;
     int l2_mod = mh - section_idx * mh_in_l2;
@@ -163,8 +174,10 @@ __device__ __forceinline__ auto tile_idx_to_work_tile(
     kv_head_idx = section_idx * nheads_in_l2 + (l2_mod - block * nhs);
     block = num_m_blocks - 1 - block;
   } else {
-    // Slow path: multi-q_tile prefill with split-KV. Per-q_tile chunk counts vary.
+    // Multi-q_tile prefill with split-KV: per-q_tile chunk counts vary.
     int qo_len_s = params.dyn_qo_len[bidb];
+    int kv_len_s = params.dyn_kv_len[bidb];
+    int len_kv_chunk_val = dyn_scalar<Params, IdType>(params, 2, params.dyn_len_kv_chunk);
     uint32_t gqa_gs = params.gqa_group_size;
     int remaining_tile = mh_block;
     block = 0; kv_head_idx = 0; chunk_idx = 0;
@@ -194,29 +207,39 @@ __device__ __forceinline__ auto tile_idx_to_work_tile(
 
   // --- Step 3: Compute the work coordinates ---
   int qo_len = params.dyn_qo_len[bidb];
-  int kv_len = kv_len_s;
+  int kv_len = params.dyn_kv_len[bidb];
   uint32_t gqa_gs = params.gqa_group_size;
   int packed_qo_len = qo_len * (uint32_t)gqa_gs;
   int packed_qo_start = block * CTA_TILE_Q;
 
-  int kv_start = chunk_idx * len_kv_chunk_val;
-  int causal_eff_kv = CAUSAL
-      ? packed_causal_kv_end(qo_len, kv_len, block, CTA_TILE_Q, num_m_blocks, (int)(uint32_t)gqa_gs)
-      : kv_len;
-  int kv_end = min(causal_eff_kv, kv_start + len_kv_chunk_val);
+  int kv_start, kv_end, causal_eff_kv;
+  if (!split_kv_active) {
+    kv_start = 0;
+    kv_end = kv_len;
+    causal_eff_kv = kv_len;
+  } else {
+    int lkc = dyn_scalar<Params, IdType>(params, 2, params.dyn_len_kv_chunk);
+    kv_start = chunk_idx * lkc;
+    causal_eff_kv = CAUSAL
+        ? packed_causal_kv_end(qo_len, kv_len, block, CTA_TILE_Q, num_m_blocks, (int)(uint32_t)gqa_gs)
+        : kv_len;
+    kv_end = min(causal_eff_kv, kv_start + lkc);
+  }
 
   // For split KV: compute per-q_tile partial_o_offset.
-  // Base offset for this sequence + cumulative offset for previous q_tiles.
-  int partial_o_offset = params.dyn_partial_o_offset ? params.dyn_partial_o_offset[bidb] : 0;
-  // Accumulate partial output entries from previous q_tiles (original order 0..block-1)
-  for (int prev_qt = 0; prev_qt < block; ++prev_qt) {
-    int prev_remaining = CAUSAL
-        ? packed_causal_kv_end(qo_len, kv_len, prev_qt, CTA_TILE_Q, num_m_blocks, (int)(uint32_t)gqa_gs)
-        : kv_len;
-    int prev_chunks = prev_remaining > len_kv_chunk_val ? ceil_div(prev_remaining, len_kv_chunk_val) : 1;
-    if (prev_chunks > 1) {
-      int prev_row_size = min((int)CTA_TILE_Q, (int)packed_qo_len - prev_qt * (int)CTA_TILE_Q);
-      partial_o_offset += prev_row_size * prev_chunks;
+  int partial_o_offset = 0;
+  if (split_kv_active) {
+    partial_o_offset = params.dyn_partial_o_offset ? params.dyn_partial_o_offset[bidb] : 0;
+    int lkc = dyn_scalar<Params, IdType>(params, 2, params.dyn_len_kv_chunk);
+    for (int prev_qt = 0; prev_qt < block; ++prev_qt) {
+      int prev_remaining = CAUSAL
+          ? packed_causal_kv_end(qo_len, kv_len, prev_qt, CTA_TILE_Q, num_m_blocks, (int)(uint32_t)gqa_gs)
+          : kv_len;
+      int prev_chunks = prev_remaining > lkc ? ceil_div(prev_remaining, lkc) : 1;
+      if (prev_chunks > 1) {
+        int prev_row_size = min((int)CTA_TILE_Q, (int)packed_qo_len - prev_qt * (int)CTA_TILE_Q);
+        partial_o_offset += prev_row_size * prev_chunks;
+      }
     }
   }
 
@@ -458,6 +481,10 @@ struct BlockBatchPagedAttentionPersistent {
     // Choose scheduling mode: read from GPU buffer for CUDA graph, else from frozen param
     const int eff_dyn_num_seqs = dyn_scalar<Params, IdType>(params, 0, params.dyn_num_seqs);
     const bool use_dynamic = (eff_dyn_num_seqs > 0);
+    // Whether any seq in this task needs KV splitting.
+    // INT_MAX = no split → zero overhead in tile mapping.
+    const bool split_kv_active = use_dynamic &&
+        dyn_scalar<Params, IdType>(params, 2, params.dyn_len_kv_chunk) != INT_MAX;
 
     // Dynamic scheduler state (for tile_idx_to_work_tile warm start)
     int dyn_bidb = 0, dyn_group_start = 0;
@@ -486,7 +513,7 @@ struct BlockBatchPagedAttentionPersistent {
 
         // Map tile_idx to work coordinates
         auto result = tile_idx_to_work_tile<CTA_TILE_Q, CAUSAL, Params, IdType>(
-            params, tile_idx, dyn_bidb, dyn_group_start);
+            params, tile_idx, dyn_bidb, dyn_group_start, split_kv_active);
         q_indptr_val = std::get<0>(result);
         kv_indptr_val = std::get<1>(result);
         o_indptr = std::get<2>(result);
@@ -529,9 +556,9 @@ struct BlockBatchPagedAttentionPersistent {
       const auto q_indptr = q_indptr_val;
       const auto kv_indptr = kv_indptr_val;
 
-      // For LPT dynamic: len_kv_chunk slot carries causal_eff_kv. Restore actual len_kv_chunk first.
+      // For LPT dynamic with split: len_kv_chunk slot carries causal_eff_kv.
       uint32_t num_kv_chunks;
-      if (use_dynamic) {
+      if (split_kv_active) {
         uint32_t causal_eff = len_kv_chunk;
         len_kv_chunk = dyn_scalar<Params, IdType>(params, 2, params.dyn_len_kv_chunk);
         num_kv_chunks = causal_eff > len_kv_chunk ? ceil_div(causal_eff, len_kv_chunk) : 1;

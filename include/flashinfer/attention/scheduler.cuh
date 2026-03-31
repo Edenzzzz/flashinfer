@@ -1381,7 +1381,14 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
 
       plan_info.dyn[task].num_seqs = num_seqs;
       plan_info.dyn[task].total_tiles = total_tiles;
-      plan_info.dyn[task].len_kv_chunk = kv_len_limit;
+      // Set len_kv_chunk = INT_MAX when no seq needs split.
+      // When INT_MAX, the kernel's tile mapping is identical to pre-split-KV code (zero overhead).
+      bool any_split = false;
+      for (int s = 0; s < num_seqs && !any_split; ++s) {
+        auto [_, __, kv] = seqs[s];
+        any_split = (kv > kv_len_limit);
+      }
+      plan_info.dyn[task].len_kv_chunk = any_split ? kv_len_limit : INT_MAX;
       // O(1) fast path requires ALL sequences to have same tiles_per_seq =
       // num_m_blocks * num_kv_chunks. Check both are uniform.
       bool all_uniform = (num_seqs > 0);
