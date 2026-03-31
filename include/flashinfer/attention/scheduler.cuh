@@ -1259,8 +1259,10 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
   std::vector<int> precomputed_kv_len_limits(NUM_TASKS, INT_MAX);
   for (uint32_t task = 0; task < NUM_TASKS; ++task) {
     int cluster_tile_q = CTA_TILE_Q_SIZES[task] * cluster_size;
+    // Split-KV triggers when seq KV > kv_limit. Factor 2x: only split when a seq
+    // has 2x the average KV per cluster, avoiding overhead when load is balanced.
     int kv_len_limit = f_kv_limit(
-        std::max(ceil_div(total_kv_lens_all * (int64_t)num_kv_heads, (int64_t)num_clusters), 1L));
+        std::max(ceil_div(total_kv_lens_all * (int64_t)num_kv_heads, (int64_t)num_clusters), 1L) * 2);
     if (cluster_tile_q >= 64) {
       kv_len_limit /= std::min(num_kv_heads, 2U);
     }
