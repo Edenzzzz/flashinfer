@@ -1322,17 +1322,10 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
         // min((kv_len - q_len) + ..., kv_len). Due to unsigned underflow when kv_len < q_len,
         // this always produces ceil(kv_len / kv_limit) — the SAME for all q_tiles.
         // So per-q_tile chunk count = ceil(kv_len / kv_limit) for splitting tiles,
-        int seq_total_kv_tiles = 0;
-        for (int qt = 0; qt < num_m_blocks; ++qt) {
-          int remaining = causal
-              ? packed_causal_kv_end(qo_len, kv_len, qt, cluster_tile_q, num_m_blocks, gqa_group_size)
-              : kv_len;
-          int qt_chunks = remaining > kv_len_limit ? ceil_div(remaining, kv_len_limit) : 1;
-          seq_total_kv_tiles += qt_chunks;
-        }
-        // For the tile layout, store max_kv_chunks for conservative addressing.
-        // But the kernel will compute per-tile num_kv_chunks from causal effective KV.
+        // The kernel uses unsigned arithmetic for num_kv_chunks, producing
+        // ceil(kv_len / kv_limit) for ALL q_tiles. Match this in the planner.
         int num_kv_chunks = std::max(1, ceil_div((int)kv_len, kv_len_limit));
+        int seq_total_kv_tiles = num_m_blocks * num_kv_chunks;
 
         dyn_qo_indptr_vec[s] = qo_indptr_h[seq_idx];
         dyn_qo_len_vec[s] = qo_len;

@@ -225,7 +225,7 @@ __device__ __forceinline__ auto tile_idx_to_work_tile(
       (IdType)kv_start,
       (IdType)kv_end,
       (IdType)kv_head_idx,
-      dyn_scalar<Params, IdType>(params, 2, params.dyn_len_kv_chunk),
+      (IdType)causal_eff_kv,  // packed into len_kv_chunk slot; kernel restores actual len_kv_chunk
       bidb,
       group_start_tile
   );
@@ -524,13 +524,21 @@ struct BlockBatchPagedAttentionPersistent {
       const auto q_indptr = q_indptr_val;
       const auto kv_indptr = kv_indptr_val;
 
+      // For LPT dynamic: len_kv_chunk slot carries causal_eff_kv. Restore actual len_kv_chunk first.
+      uint32_t num_kv_chunks;
+      if (use_dynamic) {
+        uint32_t causal_eff = len_kv_chunk;
+        len_kv_chunk = dyn_scalar<Params, IdType>(params, 2, params.dyn_len_kv_chunk);
+        num_kv_chunks = causal_eff > len_kv_chunk ? ceil_div(causal_eff, len_kv_chunk) : 1;
+      } else {
+        num_kv_chunks = ceil_div(
+            CAUSAL
+                ? min((kv_len - q_len) + ceil_div(packed_qo_start + cluster_tile_q, gqa_group_size),
+                      kv_len)
+                : kv_len,
+            len_kv_chunk);
+      }
       const uint32_t kv_chunk_idx = kv_start / len_kv_chunk;
-      const uint32_t num_kv_chunks = ceil_div(
-          CAUSAL
-              ? min((kv_len - q_len) + ceil_div(packed_qo_start + cluster_tile_q, gqa_group_size),
-                    kv_len)
-              : kv_len,
-          len_kv_chunk);
       const uint32_t qo_packed_idx_base = packed_qo_start + blockIdx.x * CTA_TILE_Q +
                                           get_warp_idx_q<KTraits>(tid.y) * NUM_MMA_Q * 16;
       const uint32_t qo_upperbound =
