@@ -88,10 +88,9 @@ __device__ __forceinline__ auto tile_idx_to_work_tile(
 
   if (uniform_m > 0) {
     // --- Fast O(1) path: all sequences have same tiles_per_seq ---
-    // uniform_m > 0 only when all seqs have same num_m_blocks AND same num_kv_chunks.
-    // tiles_per_seq = uniform_m * num_kv_heads * uniform_chunks
-    int uniform_chunks = params.dyn_num_kv_chunks ? params.dyn_num_kv_chunks[0] : 1;
-    int tiles_per_seq = uniform_m * num_kv_heads * uniform_chunks;
+    // dyn_num_kv_chunks stores seq_total_kv_tiles (sum of per-q_tile chunks).
+    int seq_kv_tiles = params.dyn_num_kv_chunks ? params.dyn_num_kv_chunks[0] : uniform_m;
+    int tiles_per_seq = seq_kv_tiles * num_kv_heads;
     bidb = tile_idx / tiles_per_seq;
     mh_block = tile_idx - bidb * tiles_per_seq;
     num_m_blocks = uniform_m;
@@ -101,12 +100,14 @@ __device__ __forceinline__ auto tile_idx_to_work_tile(
     const int lane = threadIdx.x % 32;
     const int dyn_ns = dyn_scalar<Params, IdType>(params, 0, params.dyn_num_seqs);
 
+    // get_num_tiles returns per-seq total tiles (sum of per-q_tile chunk counts).
+    // For decode (single q_tile), this = num_kv_chunks.
+    // For prefill, this is precomputed by the planner using packed_causal_kv_end.
     auto get_num_tiles = [&](int seq_start) -> int {
       int seq_idx = lane + seq_start;
       if (seq_idx < dyn_ns && lane < 31) {
-        int nm = params.dyn_num_m_blocks[seq_idx];
-        int nc = params.dyn_num_kv_chunks ? params.dyn_num_kv_chunks[seq_idx] : 1;
-        return nm * nc;
+        return params.dyn_num_kv_chunks ? params.dyn_num_kv_chunks[seq_idx]
+                                        : params.dyn_num_m_blocks[seq_idx];
       }
       return 0;
     };
@@ -141,52 +142,64 @@ __device__ __forceinline__ auto tile_idx_to_work_tile(
     mh_block = tile_idx - group_start_tile;
   }
 
-  // --- Step 2: Extract chunk index, then map (head, q_block) with L2 awareness ---
-  int num_kv_chunks = params.dyn_num_kv_chunks ? params.dyn_num_kv_chunks[bidb] : 1;
-  int mh_block_with_chunks = mh_block;
-  int chunk_idx = 0;
-  if (num_kv_chunks > 1) {
-    // Layout: mhc_block = mh_block * num_kv_chunks + chunk_idx
-    mh_block = mh_block_with_chunks / num_kv_chunks;
-    chunk_idx = mh_block_with_chunks - mh_block * num_kv_chunks;
-  }
-
-  int nheads_in_l2 = params.dyn_nheads_in_l2[bidb];
-  int mh_in_l2 = nheads_in_l2 * num_m_blocks;
-  int section_idx = mh_block / mh_in_l2;
-  int l2_mod = mh_block - section_idx * mh_in_l2;
-  int nheads_remainder = num_kv_heads - section_idx * nheads_in_l2;
-  int nheads_in_this_section = nheads_in_l2 <= nheads_remainder ? nheads_in_l2 : nheads_remainder;
-  int block = l2_mod / nheads_in_this_section;
-  int bidh_residual = l2_mod - block * nheads_in_this_section;
-  int kv_head_idx = section_idx * nheads_in_l2 + bidh_residual;
-
-  // LPT: reverse query block order (largest first for causal)
-  block = num_m_blocks - 1 - block;
-
-  // --- Step 3: Compute the work coordinates ---
-  int qo_len = params.dyn_qo_len[bidb];
-  int packed_qo_len = qo_len * (uint32_t)gqa_group_size;
-  int packed_qo_start = block * CTA_TILE_Q;
-  int kv_len = params.dyn_kv_len[bidb];
+  // --- Step 2: Map within-sequence tile to (q_block, head, chunk) ---
+  // The tiles are laid out as: for each (q_block, head) in L2 order, then chunks.
+  // Per-q_tile chunk count varies for causal. Iterate to find the right q_tile.
+  int qo_len_s = params.dyn_qo_len[bidb];
+  int kv_len_s = params.dyn_kv_len[bidb];
+  uint32_t gqa_gs = params.gqa_group_size;
   int len_kv_chunk_val = dyn_scalar<Params, IdType>(params, 2, params.dyn_len_kv_chunk);
 
-  // Split-KV: compute kv_start/kv_end for this chunk.
-  int kv_start = chunk_idx * len_kv_chunk_val;
-  int kv_end = min((int)kv_len, kv_start + len_kv_chunk_val);
-  // For non-split tiles (num_kv_chunks=1): clamp kv_end for causal to avoid
-  // processing unnecessary KV and match the static scheduler's behavior.
-  // For split tiles: the kernel must process each chunk's KV range fully.
-  // NOTE: Prefill split-KV is disabled in the planner (num_m_blocks==1 check).
-  if constexpr (CAUSAL) {
-    if (num_kv_chunks <= 1) {
-      uint32_t gqa_gs = params.gqa_group_size;
-      int causal_kv_end = (int)kv_len - (int)qo_len +
-          (int)ceil_div((uint32_t)packed_qo_start + CTA_TILE_Q, gqa_gs);
-      kv_end = max(0, min(kv_end, causal_kv_end));
-      kv_start = min(kv_start, kv_end);
+  int nheads_in_l2 = params.dyn_nheads_in_l2[bidb];
+
+  // Compute per-q_tile chunk count and find which (q_tile, head, chunk) this tile maps to
+  int remaining_tile = mh_block;
+  int block = 0, kv_head_idx = 0, chunk_idx = 0;
+  bool found = false;
+
+  // L2-aware iteration: same order as L2 mapping below
+  int mh_in_l2 = nheads_in_l2 * num_m_blocks;
+  int num_sections = (num_kv_heads + nheads_in_l2 - 1) / nheads_in_l2;
+
+  for (int sec = 0; sec < num_sections && !found; ++sec) {
+    int sec_heads = min((int)num_kv_heads - sec * nheads_in_l2, nheads_in_l2);
+    for (int b = 0; b < num_m_blocks && !found; ++b) {
+      // Reverse block order (LPT: largest first for causal)
+      int original_tile_idx = num_m_blocks - 1 - b;
+      int remaining_kv = CAUSAL
+          ? (original_tile_idx + 1 == num_m_blocks
+              ? kv_len_s
+              : max(0, (int)kv_len_s - (int)qo_len_s +
+                    (int)ceil_div((uint32_t)(original_tile_idx + 1) * CTA_TILE_Q, gqa_gs)))
+          : kv_len_s;
+      int qt_chunks = remaining_kv > len_kv_chunk_val ? ceil_div(remaining_kv, len_kv_chunk_val) : 1;
+
+      for (int h = 0; h < sec_heads && !found; ++h) {
+        int tiles_in_this_head = qt_chunks;
+        if (remaining_tile < tiles_in_this_head) {
+          block = original_tile_idx;  // original q_tile index
+          kv_head_idx = sec * nheads_in_l2 + h;
+          chunk_idx = remaining_tile;
+          found = true;
+        } else {
+          remaining_tile -= tiles_in_this_head;
+        }
+      }
     }
   }
+
+  // block is the original q_tile index (set from original_tile_idx in the loop)
+  // packed_qo_start = block * CTA_TILE_Q
+
+  // --- Step 3: Compute the work coordinates ---
+  int qo_len = qo_len_s;
+  int kv_len = kv_len_s;
+  int packed_qo_len = qo_len * (uint32_t)gqa_gs;
+  int packed_qo_start = block * CTA_TILE_Q;
+
+  // Split-KV: kv_start/kv_end from chunk_idx
+  int kv_start = chunk_idx * len_kv_chunk_val;
+  int kv_end = min((int)kv_len, kv_start + len_kv_chunk_val);
 
   // For split KV: use per-sequence partial_o_offset from planner
   int partial_o_offset = params.dyn_partial_o_offset ? params.dyn_partial_o_offset[bidb] : 0;

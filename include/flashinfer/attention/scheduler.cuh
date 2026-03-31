@@ -1324,17 +1324,26 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
         auto [seq_idx, qo_len, kv_len] = seqs[s];
         int packed_qo_len = qo_len * gqa_group_size;
         int num_m_blocks = ceil_div(packed_qo_len, cluster_tile_q);
-        // Split-KV: only for decode (CTA_TILE_Q=16). The prefill runner (CTA_TILE_Q=128)
-        // hangs when kv_start > 0 due to a bug in its KV tile iteration with non-zero offset.
-        bool can_split = (num_m_blocks == 1);
-        int num_kv_chunks = can_split ? std::max(1, ceil_div((int)kv_len, kv_len_limit)) : 1;
+        // Compute total tiles for this seq: sum over q_tiles of num_kv_chunks(q_tile).
+        // This matches the static scheduler which uses packed_causal_kv_end per q_tile.
+        int seq_total_kv_tiles = 0;
+        for (int qt = 0; qt < num_m_blocks; ++qt) {
+          int remaining = causal
+              ? packed_causal_kv_end(qo_len, kv_len, qt, cluster_tile_q, num_m_blocks, gqa_group_size)
+              : kv_len;
+          int qt_chunks = remaining > kv_len_limit ? ceil_div(remaining, kv_len_limit) : 1;
+          seq_total_kv_tiles += qt_chunks;
+        }
+        // For the tile layout, store max_kv_chunks for conservative addressing.
+        // But the kernel will compute per-tile num_kv_chunks from causal effective KV.
+        int num_kv_chunks = std::max(1, ceil_div((int)kv_len, kv_len_limit));
 
         dyn_qo_indptr_vec[s] = qo_indptr_h[seq_idx];
         dyn_qo_len_vec[s] = qo_len;
         dyn_kv_indptr_vec[s] = kv_indptr_h[seq_idx];
         dyn_kv_len_vec[s] = kv_len;
         dyn_num_m_blocks_vec[s] = num_m_blocks;
-        dyn_num_kv_chunks_vec[s] = num_kv_chunks;
+        dyn_num_kv_chunks_vec[s] = seq_total_kv_tiles;  // sum of per-q_tile chunks
 
         // L2-aware head grouping
         int64_t kv_bytes_per_head = (int64_t)kv_len * head_dim * 2 * 2;
@@ -1348,34 +1357,42 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
         nheads_in_l2 = std::min(nheads_in_l2, (int)num_kv_heads);
         dyn_nheads_in_l2_vec[s] = nheads_in_l2;
 
-        // Total tiles: each (q_block, head, chunk) is one tile
-        total_tiles += num_m_blocks * num_kv_heads * num_kv_chunks;
+        // Total tiles: per-q_tile chunk count × heads
+        total_tiles += seq_total_kv_tiles * num_kv_heads;
 
-        // Split-KV partial output addressing
-        if (num_kv_chunks > 1) {
+        // Split-KV partial output addressing: per q_tile, using causal effective KV
+        {
+          bool any_qt_splits = false;
           dyn_partial_o_offset_vec[s] = partial_o_nnz;
-          // For each q_block, add merge_indptr entries
-          int num_qo_tiles = ceil_div(packed_qo_len, cluster_tile_q);
-          for (int qo_tile_idx = 0; qo_tile_idx < num_qo_tiles; ++qo_tile_idx) {
-            int row_tile_size = std::min(cluster_tile_q,
-                                         packed_qo_len - qo_tile_idx * cluster_tile_q);
-            for (int row = 0; row < row_tile_size; ++row) {
-              merge_indptr.push_back(merge_indptr.back() + num_kv_chunks);
-              auto q = (qo_tile_idx * cluster_tile_q + row) / gqa_group_size,
-                   r = (qo_tile_idx * cluster_tile_q + row) % gqa_group_size;
-              merge_o_indices.push_back(
-                  (qo_indptr_h[seq_idx] + q) * num_kv_heads * gqa_group_size + r);
+          for (int qt = 0; qt < num_m_blocks; ++qt) {
+            int remaining = causal
+                ? packed_causal_kv_end(qo_len, kv_len, qt, cluster_tile_q, num_m_blocks, gqa_group_size)
+                : kv_len;
+            int qt_chunks = remaining > kv_len_limit ? ceil_div(remaining, kv_len_limit) : 1;
+            bool qt_split = (qt_chunks > 1);
+            int row_tile_size = std::min(cluster_tile_q, packed_qo_len - qt * cluster_tile_q);
+            if (qt_split) {
+              any_qt_splits = true;
+              for (int row = 0; row < row_tile_size; ++row) {
+                merge_indptr.push_back(merge_indptr.back() + qt_chunks);
+                auto q = (qt * cluster_tile_q + row) / gqa_group_size,
+                     r = (qt * cluster_tile_q + row) % gqa_group_size;
+                merge_o_indices.push_back(
+                    (qo_indptr_h[seq_idx] + q) * num_kv_heads * gqa_group_size + r);
+              }
+              partial_o_nnz += row_tile_size * qt_chunks;
             }
-            partial_o_nnz += row_tile_size * num_kv_chunks;
+            // Non-splitting q_tiles write through — no merge_indptr entries
+          }
+          if (!any_qt_splits) {
+            dyn_partial_o_offset_vec[s] = 0;  // no split needed
           }
         }
       }
 
       plan_info.dyn[task].num_seqs = num_seqs;
       plan_info.dyn[task].total_tiles = total_tiles;
-      bool any_split = false;
-      for (int s = 0; s < num_seqs && !any_split; ++s) any_split = (dyn_num_kv_chunks_vec[s] > 1);
-      plan_info.dyn[task].len_kv_chunk = any_split ? kv_len_limit : INT_MAX;
+      plan_info.dyn[task].len_kv_chunk = kv_len_limit;
       // O(1) fast path requires ALL sequences to have same tiles_per_seq =
       // num_m_blocks * num_kv_chunks. Check both are uniform.
       bool all_uniform = (num_seqs > 0);
