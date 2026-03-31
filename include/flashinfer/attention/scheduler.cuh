@@ -808,15 +808,7 @@ std::vector<T> flatten(const std::vector<std::vector<T>>& vec, int size_after_fl
   return result;
 }
 
-inline int packed_causal_kv_end(int qo_len, int kv_len, int qo_tile_idx, int cluster_tile_q,
-                                int num_qo_tiles, int group_size) {
-  if (qo_tile_idx + 1 == num_qo_tiles) {
-    return kv_len;
-  }
-  int kv_len_init = kv_len - qo_len;  // right aligned
-  return max(min(kv_len_init + ceil_div((qo_tile_idx + 1) * cluster_tile_q, group_size), kv_len),
-             0);
-}
+// packed_causal_kv_end is now in utils.cuh (shared between host planner and device kernel)
 
 struct PrefillPlanSM90Info {
   int64_t qo_tile_indices_offset;
@@ -1326,6 +1318,10 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
         int num_m_blocks = ceil_div(packed_qo_len, cluster_tile_q);
         // Compute total tiles for this seq: sum over q_tiles of num_kv_chunks(q_tile).
         // This matches the static scheduler which uses packed_causal_kv_end per q_tile.
+        // The kernel computes num_kv_chunks using unsigned arithmetic:
+        // min((kv_len - q_len) + ..., kv_len). Due to unsigned underflow when kv_len < q_len,
+        // this always produces ceil(kv_len / kv_limit) — the SAME for all q_tiles.
+        // So per-q_tile chunk count = ceil(kv_len / kv_limit) for splitting tiles,
         int seq_total_kv_tiles = 0;
         for (int qt = 0; qt < num_m_blocks; ++qt) {
           int remaining = causal

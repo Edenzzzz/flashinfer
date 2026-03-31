@@ -167,10 +167,7 @@ __device__ __forceinline__ auto tile_idx_to_work_tile(
       // Reverse block order (LPT: largest first for causal)
       int original_tile_idx = num_m_blocks - 1 - b;
       int remaining_kv = CAUSAL
-          ? (original_tile_idx + 1 == num_m_blocks
-              ? kv_len_s
-              : max(0, (int)kv_len_s - (int)qo_len_s +
-                    (int)ceil_div((uint32_t)(original_tile_idx + 1) * CTA_TILE_Q, gqa_gs)))
+          ? packed_causal_kv_end(qo_len_s, kv_len_s, original_tile_idx, CTA_TILE_Q, num_m_blocks, (int)(uint32_t)gqa_gs)
           : kv_len_s;
       int qt_chunks = remaining_kv > len_kv_chunk_val ? ceil_div(remaining_kv, len_kv_chunk_val) : 1;
 
@@ -197,12 +194,26 @@ __device__ __forceinline__ auto tile_idx_to_work_tile(
   int packed_qo_len = qo_len * (uint32_t)gqa_gs;
   int packed_qo_start = block * CTA_TILE_Q;
 
-  // Split-KV: kv_start/kv_end from chunk_idx
   int kv_start = chunk_idx * len_kv_chunk_val;
-  int kv_end = min((int)kv_len, kv_start + len_kv_chunk_val);
+  int causal_eff_kv = CAUSAL
+      ? packed_causal_kv_end(qo_len, kv_len, block, CTA_TILE_Q, num_m_blocks, (int)(uint32_t)gqa_gs)
+      : kv_len;
+  int kv_end = min(causal_eff_kv, kv_start + len_kv_chunk_val);
 
-  // For split KV: use per-sequence partial_o_offset from planner
+  // For split KV: compute per-q_tile partial_o_offset.
+  // Base offset for this sequence + cumulative offset for previous q_tiles.
   int partial_o_offset = params.dyn_partial_o_offset ? params.dyn_partial_o_offset[bidb] : 0;
+  // Accumulate partial output entries from previous q_tiles (original order 0..block-1)
+  for (int prev_qt = 0; prev_qt < block; ++prev_qt) {
+    int prev_remaining = CAUSAL
+        ? packed_causal_kv_end(qo_len, kv_len, prev_qt, CTA_TILE_Q, num_m_blocks, (int)(uint32_t)gqa_gs)
+        : kv_len;
+    int prev_chunks = prev_remaining > len_kv_chunk_val ? ceil_div(prev_remaining, len_kv_chunk_val) : 1;
+    if (prev_chunks > 1) {
+      int prev_row_size = min((int)CTA_TILE_Q, (int)packed_qo_len - prev_qt * (int)CTA_TILE_Q);
+      partial_o_offset += prev_row_size * prev_chunks;
+    }
+  }
 
   return std::tuple(
       (IdType)params.dyn_qo_indptr[bidb],

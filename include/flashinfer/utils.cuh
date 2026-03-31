@@ -384,6 +384,21 @@ __device__ __forceinline__ uint32_t dim4_offset(const uint32_t& dim_c, const uin
   template <typename T>                                                                        \
   inline constexpr bool has_##member##_v = has_##member<T>::value;
 
+/*!
+ * \brief Compute the effective KV length for a given QO tile under causal masking.
+ * Used by both the CPU planner and GPU kernel for split-KV tile mapping.
+ */
+__host__ __device__ inline int packed_causal_kv_end(int qo_len, int kv_len, int qo_tile_idx,
+                                                    int cluster_tile_q, int num_qo_tiles,
+                                                    int group_size) {
+  if (qo_tile_idx + 1 == num_qo_tiles) {
+    return kv_len;
+  }
+  int kv_len_init = kv_len - qo_len;
+  return max(min(kv_len_init + ceil_div((qo_tile_idx + 1) * cluster_tile_q, group_size), kv_len),
+             0);
+}
+
 }  // namespace flashinfer
 
 #endif  // FLASHINFER_UTILS_CUH_
