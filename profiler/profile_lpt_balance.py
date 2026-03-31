@@ -185,29 +185,36 @@ def print_stats(stats):
 
 
 if __name__ == "__main__":
-    # Workloads designed to trigger KV splitting (kv_len > kv_len_limit).
-    # kv_len_limit ≈ ceil(total_kv_lens * num_kv_heads / num_clusters / 256) * 256.
-    # With few sequences and long KV, kv_len_limit is small → splitting triggers.
+    # Realistic LLM serving workloads based on WL1-6 and agent workload analysis.
+    # Decode KV ≤16k, ≤100 decode requests. Mixed split/non-split KV.
     workloads = [
-        # WL1: 2 very long sequences → kv_len_limit small → KV splitting + reduction
-        ("2 long-KV decode (kv=65536) — forces KV splitting",
-         [(65536, 1)] * 2),
+        # WL1-like: Short output, moderate prefill. Decode KV ~2k (no split expected).
+        ("WL1: 60 decode@kv2k + 2 prefill@4k (no split)",
+         [(2048, 1)] * 60 + [(4096, 4096)] * 2),
 
-        # WL2: Mixed with long decode — triggers splitting, smaller than before
-        ("1 prefill@4096 + 3 decode@32768 — mixed + KV split",
-         [(32768, 1)] * 3 + [(4096, 4096)] * 1),
+        # WL2-like: Medium context. Decode KV ~4k → may split depending on kv_limit.
+        ("WL2: 40 decode@kv4k + 1 prefill@8k (borderline split)",
+         [(4096, 1)] * 40 + [(8192, 8192)] * 1),
 
-        # WL3: More sequences to use more SMs, with splitting
-        ("10 decode@16384 + 2 prefill@4096 — many SMs + split",
-         [(16384, 1)] * 10 + [(4096, 4096)] * 2),
+        # WL3-like: Long context decode. Decode KV 8k → split-KV triggered.
+        ("WL3: 30 decode@kv8k + 1 prefill@12k (decode split)",
+         [(8192, 1)] * 30 + [(12000, 12000)] * 1),
 
-        # WL4: Realistic chunked-prefill with long context
-        ("20 decode@16384 + 1 prefill@4096 — chunked prefill pattern",
-         [(16384, 1)] * 20 + [(4096, 4096)] * 1),
+        # WL4-like: Very long decode context. Decode KV 12k → heavy split-KV.
+        ("WL4: 20 decode@kv12k + 1 prefill@4k (heavy split)",
+         [(12288, 1)] * 20 + [(4096, 4096)] * 1),
 
-        # WL5: Large batch to use all SMs (no splitting expected)
-        ("128 decode@2048 + 1 prefill@4096 — baseline (no split)",
-         [(2048, 1)] * 128 + [(4096, 4096)] * 1),
+        # Agent-like: Many short decodes + multiple small prefills.
+        ("Agent: 80 decode@kv1k + 3 prefill@2k (no split, many seqs)",
+         [(1024, 1)] * 80 + [(2048, 2048)] * 3),
+
+        # Mixed-KV: Varying decode KV lengths (realistic heterogeneous batch).
+        ("Mixed: 50 decode@kv1k-8k + 2 prefill@4k (mixed split/non-split)",
+         [(1024 + i * 140, 1) for i in range(50)] + [(4096, 4096)] * 2),
+
+        # Long prefill + few decode: Chunked prefill dominant.
+        ("Prefill-heavy: 10 decode@kv4k + 1 prefill@16k (prefill split + decode split)",
+         [(4096, 1)] * 10 + [(16384, 16384)] * 1),
     ]
 
     for wl_name, config in workloads:

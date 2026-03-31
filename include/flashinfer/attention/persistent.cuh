@@ -143,54 +143,59 @@ __device__ __forceinline__ auto tile_idx_to_work_tile(
   }
 
   // --- Step 2: Map within-sequence tile to (q_block, head, chunk) ---
-  // The tiles are laid out as: for each (q_block, head) in L2 order, then chunks.
-  // Per-q_tile chunk count varies for causal. Iterate to find the right q_tile.
-  int qo_len_s = params.dyn_qo_len[bidb];
-  int kv_len_s = params.dyn_kv_len[bidb];
-  uint32_t gqa_gs = params.gqa_group_size;
-  int len_kv_chunk_val = dyn_scalar<Params, IdType>(params, 2, params.dyn_len_kv_chunk);
-
   int nheads_in_l2 = params.dyn_nheads_in_l2[bidb];
+  int kv_len_s = params.dyn_kv_len[bidb];
+  int len_kv_chunk_val = dyn_scalar<Params, IdType>(params, 2, params.dyn_len_kv_chunk);
+  int block, kv_head_idx, chunk_idx;
 
-  // Compute per-q_tile chunk count and find which (q_tile, head, chunk) this tile maps to
-  int remaining_tile = mh_block;
-  int block = 0, kv_head_idx = 0, chunk_idx = 0;
-  bool found = false;
-
-  // L2-aware iteration: same order as L2 mapping below
-  int mh_in_l2 = nheads_in_l2 * num_m_blocks;
-  int num_sections = (num_kv_heads + nheads_in_l2 - 1) / nheads_in_l2;
-
-  for (int sec = 0; sec < num_sections && !found; ++sec) {
-    int sec_heads = min((int)num_kv_heads - sec * nheads_in_l2, nheads_in_l2);
-    for (int b = 0; b < num_m_blocks && !found; ++b) {
-      // Reverse block order (LPT: largest first for causal)
-      int original_tile_idx = num_m_blocks - 1 - b;
-      int remaining_kv = CAUSAL
-          ? packed_causal_kv_end(qo_len_s, kv_len_s, original_tile_idx, CTA_TILE_Q, num_m_blocks, (int)(uint32_t)gqa_gs)
-          : kv_len_s;
-      int qt_chunks = remaining_kv > len_kv_chunk_val ? ceil_div(remaining_kv, len_kv_chunk_val) : 1;
-
-      for (int h = 0; h < sec_heads && !found; ++h) {
-        int tiles_in_this_head = qt_chunks;
-        if (remaining_tile < tiles_in_this_head) {
-          block = original_tile_idx;  // original q_tile index
-          kv_head_idx = sec * nheads_in_l2 + h;
-          chunk_idx = remaining_tile;
-          found = true;
-        } else {
-          remaining_tile -= tiles_in_this_head;
+  // Fast path: no split (kv_len <= kv_limit) OR single q_tile (decode).
+  // Uses O(1) division — same as pre-split-KV code.
+  if (kv_len_s <= len_kv_chunk_val || num_m_blocks == 1) {
+    int nc = kv_len_s > len_kv_chunk_val ? ceil_div(kv_len_s, len_kv_chunk_val) : 1;
+    int mh = nc > 1 ? mh_block / nc : mh_block;
+    chunk_idx = nc > 1 ? mh_block - mh * nc : 0;
+    int mh_in_l2 = nheads_in_l2 * num_m_blocks;
+    int section_idx = mh / mh_in_l2;
+    int l2_mod = mh - section_idx * mh_in_l2;
+    int nhr = num_kv_heads - section_idx * nheads_in_l2;
+    int nhs = nheads_in_l2 <= nhr ? nheads_in_l2 : nhr;
+    block = l2_mod / nhs;
+    kv_head_idx = section_idx * nheads_in_l2 + (l2_mod - block * nhs);
+    block = num_m_blocks - 1 - block;
+  } else {
+    // Slow path: multi-q_tile prefill with split-KV. Per-q_tile chunk counts vary.
+    int qo_len_s = params.dyn_qo_len[bidb];
+    uint32_t gqa_gs = params.gqa_group_size;
+    int remaining_tile = mh_block;
+    block = 0; kv_head_idx = 0; chunk_idx = 0;
+    bool found = false;
+    int num_sections = (num_kv_heads + nheads_in_l2 - 1) / nheads_in_l2;
+    for (int sec = 0; sec < num_sections && !found; ++sec) {
+      int sec_heads = min((int)num_kv_heads - sec * nheads_in_l2, nheads_in_l2);
+      for (int b = 0; b < num_m_blocks && !found; ++b) {
+        int orig = num_m_blocks - 1 - b;
+        int rem_kv = CAUSAL
+            ? packed_causal_kv_end(qo_len_s, kv_len_s, orig, CTA_TILE_Q, num_m_blocks, (int)(uint32_t)gqa_gs)
+            : kv_len_s;
+        int qtc = rem_kv > len_kv_chunk_val ? ceil_div(rem_kv, len_kv_chunk_val) : 1;
+        for (int h = 0; h < sec_heads && !found; ++h) {
+          if (remaining_tile < qtc) {
+            block = orig;
+            kv_head_idx = sec * nheads_in_l2 + h;
+            chunk_idx = remaining_tile;
+            found = true;
+          } else {
+            remaining_tile -= qtc;
+          }
         }
       }
     }
   }
 
-  // block is the original q_tile index (set from original_tile_idx in the loop)
-  // packed_qo_start = block * CTA_TILE_Q
-
   // --- Step 3: Compute the work coordinates ---
-  int qo_len = qo_len_s;
+  int qo_len = params.dyn_qo_len[bidb];
   int kv_len = kv_len_s;
+  uint32_t gqa_gs = params.gqa_group_size;
   int packed_qo_len = qo_len * (uint32_t)gqa_gs;
   int packed_qo_start = block * CTA_TILE_Q;
 
