@@ -411,19 +411,25 @@ if __name__ == "__main__":
             print("Speedups:", dict(zip(scale_values, speedups)))
 
     else:
-        # Irregular sequence lengths for prefill and decode
-        d_q_len_configs = [[1] * 100] * 7
+        # Irregular sequence lengths for prefill and decode (100 decode each)
+        d_q_len_configs = [[1] * 100] * 9
         d_kv_len_configs = [
-            [2048] * 100,
-            [2048] * 100,
-            [2048] * 100,
-            [2048] * 100,
-            [4096] * 100,
-            [8192] * 100,
-            [8192] * 100,
+            [2048] * 100,                                    # Case 1
+            [2048] * 100,                                    # Case 2
+            [2048] * 100,                                    # Case 3
+            [2048] * 100,                                    # Case 4
+            [4096] * 100,                                    # Case 5
+            [8192] * 100,                                    # Case 6
+            [8192] * 100,                                    # Case 7
+            [2048] * 95 + [24576] * 5,                       # Case 8: split-KV decode
+            [2048] * 100,                                    # Case 9: split-KV prefill
         ]
-        p_q_configs = [[512], [1536], [2048] * 2, [2048], [4096], [4096], [6000]]
-        p_kv_configs = [[512], [1536], [2048] * 2, [2048], [4096], [4096], [7000]]
+        p_q_configs = [[512], [1536], [2048] * 2, [2048], [4096], [4096], [6000],
+                       [2048],                               # Case 8
+                       [4096]]                               # Case 9
+        p_kv_configs = [[512], [1536], [2048] * 2, [2048], [4096], [4096], [7000],
+                        [2048],                              # Case 8
+                        [24576]]                             # Case 9: long KV prefill
 
         for idx, (p_q_lens, p_kv_lens, d_q_len, d_kv_len) in enumerate(
             zip(p_q_configs, p_kv_configs, d_q_len_configs, d_kv_len_configs)

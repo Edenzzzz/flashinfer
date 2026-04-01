@@ -185,36 +185,39 @@ def print_stats(stats):
 
 
 if __name__ == "__main__":
-    # Realistic LLM serving workloads based on WL1-6 and agent workload analysis.
-    # Decode KV ≤16k, ≤100 decode requests. Mixed split/non-split KV.
+    # All workloads use 100 decode to match bench_mixed_attention.py Cases 1-7
+    # (represents peak server pressure). Format: (kv_len, qo_len) per sequence.
     workloads = [
-        # WL1-like: Short output, moderate prefill. Decode KV ~2k (no split expected).
-        ("WL1: 60 decode@kv2k + 2 prefill@4k (no split)",
-         [(2048, 1)] * 60 + [(4096, 4096)] * 2),
+        # Cases 1-7: match bench_mixed_attention.py exactly
+        ("Case 1: 100d@kv2k + 1p@512",
+         [(2048, 1)] * 100 + [(512, 512)] * 1),
 
-        # WL2-like: Medium context. Decode KV ~4k → may split depending on kv_limit.
-        ("WL2: 40 decode@kv4k + 1 prefill@8k (borderline split)",
-         [(4096, 1)] * 40 + [(8192, 8192)] * 1),
+        ("Case 2: 100d@kv2k + 1p@1536",
+         [(2048, 1)] * 100 + [(1536, 1536)] * 1),
 
-        # WL3-like: Long context decode. Decode KV 8k → split-KV triggered.
-        ("WL3: 30 decode@kv8k + 1 prefill@12k (decode split)",
-         [(8192, 1)] * 30 + [(12000, 12000)] * 1),
+        ("Case 3: 100d@kv2k + 2p@2048",
+         [(2048, 1)] * 100 + [(2048, 2048)] * 2),
 
-        # WL4-like: Very long decode context. Decode KV 12k → heavy split-KV.
-        ("WL4: 20 decode@kv12k + 1 prefill@4k (heavy split)",
-         [(12288, 1)] * 20 + [(4096, 4096)] * 1),
+        ("Case 4: 100d@kv2k + 1p@2048",
+         [(2048, 1)] * 100 + [(2048, 2048)] * 1),
 
-        # Agent-like: Many short decodes + multiple small prefills.
-        ("Agent: 80 decode@kv1k + 3 prefill@2k (no split, many seqs)",
-         [(1024, 1)] * 80 + [(2048, 2048)] * 3),
+        ("Case 5: 100d@kv4k + 1p@4096",
+         [(4096, 1)] * 100 + [(4096, 4096)] * 1),
 
-        # Mixed-KV: Varying decode KV lengths (realistic heterogeneous batch).
-        ("Mixed: 50 decode@kv1k-8k + 2 prefill@4k (mixed split/non-split)",
-         [(1024 + i * 140, 1) for i in range(50)] + [(4096, 4096)] * 2),
+        ("Case 6: 100d@kv8k + 1p@4096",
+         [(8192, 1)] * 100 + [(4096, 4096)] * 1),
 
-        # Long prefill + few decode: Chunked prefill dominant.
-        ("Prefill-heavy: 10 decode@kv4k + 1 prefill@16k (prefill split + decode split)",
-         [(4096, 1)] * 10 + [(16384, 16384)] * 1),
+        ("Case 7: 100d@kv8k + 1p@6000",
+         [(8192, 1)] * 100 + [(7000, 6000)] * 1),
+
+        # Split-KV decode: few decode seqs with long KV among short ones
+        # kv_limit ≈ 12k with 100 seqs, so kv=24k triggers split
+        ("Split-KV decode: 95d@kv2k + 5d@kv24k + 1p@2k",
+         [(2048, 1)] * 95 + [(24576, 1)] * 5 + [(2048, 2048)] * 1),
+
+        # Split-KV prefill: 100 short decode + 1 prefill with long KV
+        ("Split-KV prefill: 100d@kv2k + 1p@kv24k,q4k",
+         [(2048, 1)] * 100 + [(24576, 4096)] * 1),
     ]
 
     for wl_name, config in workloads:
