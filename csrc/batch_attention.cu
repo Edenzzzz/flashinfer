@@ -86,14 +86,6 @@ void BatchPagedAttentionRun(TensorView float_workspace_buffer, TensorView int_wo
   HolisticPlanInfo<2> plan_info;
   plan_info.FromVector(std::vector<int64_t>(plan_info_vec.begin(), plan_info_vec.end()));
 
-  static int run_count = 0;
-  run_count++;
-  if (run_count <= 5 || (plan_info.enable_cuda_graph && run_count <= 50)) {
-    fprintf(stderr, "[DEBUG Run] count=%d enable_cg=%d flipped=%d dyn0_ns=%d dyn1_ns=%d\n",
-            run_count, (int)plan_info.enable_cuda_graph, (int)plan_info.flipped_schedule,
-            plan_info.dyn[0].num_seqs, plan_info.dyn[1].num_seqs);
-  }
-
   void* float_buffer_ptr = float_workspace_buffer.data_ptr();
   void* int_buffer_ptr = int_workspace_buffer.data_ptr();
 
