@@ -148,21 +148,17 @@ def run_profile(seq_len_config, flipped, label, num_kv_heads=8, num_qo_heads=32,
         use_profiler=True, flipped_schedule=flipped,
     )
 
+    from flashinfer.testing.utils import bench_gpu_time
+
     profiler_buffer = torch.zeros((profiler_buffer_size,), dtype=torch.uint64, device="cuda")
 
-    # Warmup
-    wrapper.run(q, kv_data, profiler_buffer=profiler_buffer)
-    profiler_buffer.zero_()
+    # Measure kernel time with bench_gpu_time (warmup + L2 flush)
+    measurements = bench_gpu_time(lambda: wrapper.run(q, kv_data))
+    kernel_ms = float(np.median(measurements))
 
-    # Profile
-    torch.cuda.synchronize()
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    start.record()
+    # Run once more with profiler buffer to get grid.sync() data
+    profiler_buffer.zero_()
     wrapper.run(q, kv_data, profiler_buffer=profiler_buffer)
-    end.record()
-    end.synchronize()
-    kernel_ms = start.elapsed_time(end)
 
     stats = extract_grid_sync_wait(profiler_buffer)
     stats["kernel_ms"] = kernel_ms

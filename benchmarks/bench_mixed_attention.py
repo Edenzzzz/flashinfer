@@ -12,8 +12,8 @@ def run_bench(
     d_qo_lens,
     d_kv_lens,
     # page_block_size=1,
-    num_kv_heads=4,
-    num_qo_heads=28,
+    num_kv_heads=8,
+    num_qo_heads=32,
     head_dim=128,
     device=0,
     causal=True,
@@ -85,49 +85,35 @@ def run_bench(
     o = wrapper_old.run(q, kv_data)
     measurements = bench_gpu_time(lambda: wrapper_old.run(q, kv_data))
     ms_old = np.median(measurements)
+    o_ref = o.clone()
+    del wrapper_old, o; torch.cuda.empty_cache()
 
-    # Persistent with FlippedSchedule (default — auto-selects flipped when beneficial)
-    wrapper_persistent = flashinfer.BatchAttention(kv_layout="NHD")
-    wrapper_persistent.plan(
-        q_indptr.to(device),
-        kv_indptr.to(device),
-        torch.arange(num_blocks, dtype=torch.int32, device=device),
-        seq_lens.to(device),
-        num_qo_heads,
-        num_kv_heads,
-        head_dim,
-        head_dim,
-        page_block_size,
-        causal=causal,
-        q_data_type=torch.bfloat16,
-        kv_data_type=torch.bfloat16,
-    )
-    o_persistent, _ = wrapper_persistent.run(q, kv_data)
-    measurements_persistent = bench_gpu_time(lambda: wrapper_persistent.run(q, kv_data))
-    ms_persistent = np.median(measurements_persistent)
-    torch.testing.assert_close(o_persistent, o, rtol=4e-3, atol=4e-3)
+    # Helper to create BatchAttention, bench, and cleanup
+    def _bench_persistent(flipped_schedule=None):
+        w = flashinfer.BatchAttention(kv_layout="NHD")
+        plan_kwargs = dict(
+            q_data_type=torch.bfloat16, kv_data_type=torch.bfloat16, causal=causal,
+        )
+        if flipped_schedule is not None:
+            plan_kwargs["flipped_schedule"] = flipped_schedule
+        w.plan(
+            q_indptr.to(device), kv_indptr.to(device),
+            torch.arange(num_blocks, dtype=torch.int32, device=device),
+            seq_lens.to(device),
+            num_qo_heads, num_kv_heads, head_dim, head_dim, page_block_size,
+            **plan_kwargs,
+        )
+        out, _ = w.run(q, kv_data)
+        torch.testing.assert_close(out, o_ref, rtol=4e-3, atol=4e-3)
+        ms = float(np.median(bench_gpu_time(lambda: w.run(q, kv_data))))
+        del w, out; torch.cuda.empty_cache()
+        return ms
 
-    # Persistent with static schedule (FlippedSchedule disabled)
-    wrapper_persistent_static = flashinfer.BatchAttention(kv_layout="NHD")
-    wrapper_persistent_static.plan(
-        q_indptr.to(device),
-        kv_indptr.to(device),
-        torch.arange(num_blocks, dtype=torch.int32, device=device),
-        seq_lens.to(device),
-        num_qo_heads,
-        num_kv_heads,
-        head_dim,
-        head_dim,
-        page_block_size,
-        causal=causal,
-        q_data_type=torch.bfloat16,
-        kv_data_type=torch.bfloat16,
-        flipped_schedule=False,
-    )
-    o_persistent_static, _ = wrapper_persistent_static.run(q, kv_data)
-    measurements_persistent_static = bench_gpu_time(lambda: wrapper_persistent_static.run(q, kv_data))
-    ms_persistent_static = np.median(measurements_persistent_static)
-    torch.testing.assert_close(o_persistent_static, o, rtol=4e-3, atol=4e-3)
+    # Persistent with FlippedSchedule
+    ms_persistent = _bench_persistent()
+
+    # Persistent with static schedule
+    ms_persistent_static = _bench_persistent(flipped_schedule=False)
 
     # Batched POD Attention
     q_d = q[: d_q_indptr[-1]]
@@ -174,7 +160,7 @@ def run_bench(
 
     # Verify output matches (reference o is decode-first, then prefill)
     torch.testing.assert_close(
-        o_batch_pod, o, rtol=4e-3, atol=4e-3
+        o_batch_pod, o_ref, rtol=4e-3, atol=4e-3
     )
     measurements = bench_gpu_time(
         lambda: wrapper_pod.run(
@@ -225,7 +211,7 @@ def run_bench(
         o_pod = torch.cat([o_d, o_p], dim=0)
         # Verify output matches
         torch.testing.assert_close(
-            o, o_pod, rtol=4e-3, atol=4e-3, msg="POD-Attention output mismatch!"
+            o_ref, o_pod, rtol=4e-3, atol=4e-3, msg="POD-Attention output mismatch!"
         )
         measurements = bench_gpu_time(
             lambda: wrapper_pod.run(
@@ -315,6 +301,12 @@ def run_bench(
     print(
         f"Memory bandwidth (Persistent Static): {bandwidth_persistent_static_gb_s:.2f} GB/s"
     )
+
+    # Free GPU memory between cases
+    import gc
+    del wrapper_pod, q, kv_data, workspace_buffer, o_ref
+    gc.collect()
+    torch.cuda.empty_cache()
 
     return ms_persistent / ms_batch_pod
 
