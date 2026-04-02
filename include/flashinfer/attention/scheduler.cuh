@@ -1263,7 +1263,8 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
   }
   // Disable LPT when prefill compute dominates decode (ratio >= 2.0).
   // Compute-bound prefill makes dynamic scheduling overhead pure loss.
-  if (plan_info.flipped_schedule && total_kv_lens_per_task[1] > 0) {
+  // Skip when CG enabled — CG captures workspace layout at flipped=true.
+  if (!enable_cuda_graph && plan_info.flipped_schedule && total_kv_lens_per_task[1] > 0) {
     double prefill_decode_ratio =
         (double)total_kv_lens_per_task[0] / (double)total_kv_lens_per_task[1];
     if (prefill_decode_ratio >= 2.0) {
