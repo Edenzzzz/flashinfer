@@ -222,6 +222,7 @@ void BatchPagedAttentionRun(TensorView float_workspace_buffer, TensorView int_wo
             params[i].dyn_total_tiles = plan_info.dyn[i].total_tiles;
             params[i].dyn_len_kv_chunk = plan_info.dyn[i].len_kv_chunk;
             params[i].dyn_uniform_num_m_blocks = plan_info.dyn[i].uniform_num_m_blocks;
+            params[i].dyn_tile_stride = plan_info.dyn[i].tile_stride;
           } else {
             params[i].dyn_num_seqs = 0;
             params[i].dyn_qo_indptr = nullptr;
@@ -235,6 +236,7 @@ void BatchPagedAttentionRun(TensorView float_workspace_buffer, TensorView int_wo
             params[i].dyn_total_tiles = 0;
             params[i].dyn_len_kv_chunk = 0;
             params[i].dyn_uniform_num_m_blocks = 0;
+            params[i].dyn_tile_stride = 1;
           }
           // NOTE(Wenxuan) directly using the additional_params_decl from generate_additional_params
           // will be problematic because of the params[i]

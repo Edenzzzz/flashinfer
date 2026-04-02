@@ -41,7 +41,7 @@ __global__ void lpt_plan_kernel(
     IdType* __restrict__ dyn_partial_o_offset,
     IdType* __restrict__ dyn_num_kv_chunks,
     // Output: scalars
-    IdType* __restrict__ dyn_scalars,  // [4]: num_seqs, total_tiles, len_kv_chunk, uniform_m
+    IdType* __restrict__ dyn_scalars,  // [5]: num_seqs, total_tiles, len_kv_chunk, uniform_m, tile_stride
     // Output: merge data
     IdType* __restrict__ merge_indptr,
     IdType* __restrict__ merge_o_indices,
@@ -120,6 +120,7 @@ __global__ void lpt_plan_kernel(
         dyn_scalars[1] = shared_total_tiles;
         dyn_scalars[2] = kv_len_limit;
         dyn_scalars[3] = shared_uniform;
+        dyn_scalars[4] = 1;  // tile_stride: 1 = sequential LPT (default)
     }
 
     // Phase 4: Compute partial_o_offset and merge_indptr
