@@ -1245,6 +1245,7 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
     return x <= 128 ? 128 : ceil_div(x, 256) * 256;
   };
   int64_t total_kv_lens_all = 0;
+  int64_t total_kv_lens_per_task[NUM_TASKS] = {};
   for (uint32_t task = 0; task < NUM_TASKS; ++task) {
     int cluster_tile_q = CTA_TILE_Q_SIZES[task] * cluster_size;
     for (auto& [_, qo_len, kv_len] : idx_qo_kv_len_vec[task]) {
@@ -1256,7 +1257,17 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
                                           num_qo_tiles, gqa_group_size)
                    : kv_len;
         total_kv_lens_all += effective_kv_len;
+        total_kv_lens_per_task[task] += effective_kv_len;
       }
+    }
+  }
+  // Disable LPT when prefill compute dominates decode (ratio >= 2.0).
+  // Compute-bound prefill makes dynamic scheduling overhead pure loss.
+  if (plan_info.flipped_schedule && total_kv_lens_per_task[1] > 0) {
+    double prefill_decode_ratio =
+        (double)total_kv_lens_per_task[0] / (double)total_kv_lens_per_task[1];
+    if (prefill_decode_ratio >= 2.0) {
+      plan_info.flipped_schedule = false;
     }
   }
   std::vector<int> precomputed_kv_len_limits(NUM_TASKS, INT_MAX);
