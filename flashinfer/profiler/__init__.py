@@ -76,7 +76,7 @@ def export_to_perfetto_trace(
             block_to_sm[block_idx] = sm_id
 
     sm_pid_map = {}      # sm_id -> perfetto group
-    track_map: Dict[Tuple[int, int, int], Any] = {}
+    track_map: Dict[Tuple[int, int], Any] = {}  # (block_idx, group_idx) -> track
 
     for i in range(1, len(profiler_buffer_host)):
         if profiler_buffer_host[i] == 0:
@@ -88,18 +88,16 @@ def export_to_perfetto_trace(
             tag, num_blocks, num_groups
         )
 
-        # Group by SM (sorted by SM id), blocks from same SM appear side by side
+        # Group by SM, one track per (block, group) — all events on same line
         if sm_id not in sm_pid_map:
             sm_pid_map[sm_id] = tgen.create_group(f"SM_{sm_id:03d}")
         sm_group = sm_pid_map[sm_id]
 
         event = event_names[event_idx]
-
-        if (block_idx, group_idx, event_idx) in track_map:
-            track = track_map[(block_idx, group_idx, event_idx)]
-        else:
-            track = sm_group.create_track(f"blk{block_idx}_g{group_idx}_{event}")
-            track_map[(block_idx, group_idx, event_idx)] = track
+        tkey = (block_idx, group_idx)
+        if tkey not in track_map:
+            track_map[tkey] = sm_group.create_track(f"blk{block_idx}_g{group_idx}")
+        track = track_map[tkey]
 
         if event_type == EventType.kBegin.value:
             track.open(timestamp, event)
