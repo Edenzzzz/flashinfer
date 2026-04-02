@@ -138,27 +138,32 @@ def run_profile(seq_len_config, flipped, label, num_kv_heads=8, num_qo_heads=32,
     q = torch.rand(q_indptr[-1].item(), num_qo_heads, head_dim, device="cuda", dtype=torch.bfloat16)
     kv_data = torch.randn(num_blocks, 2, page_size, num_kv_heads, head_dim, dtype=torch.bfloat16, device="cuda")
 
-    wrapper = flashinfer.BatchAttention(kv_layout="NHD")
-    wrapper.plan(
+    from flashinfer.testing.utils import bench_gpu_time
+
+    plan_args = (
         q_indptr.to("cuda"), kv_indptr.to("cuda"),
         torch.arange(num_blocks).int().to("cuda"),
         seq_lens.to("cuda"),
         num_qo_heads, num_kv_heads, head_dim, head_dim, page_size,
-        causal=True, q_data_type=torch.bfloat16, kv_data_type=torch.bfloat16,
-        use_profiler=True, flipped_schedule=flipped,
     )
+    plan_kwargs = dict(causal=True, q_data_type=torch.bfloat16, kv_data_type=torch.bfloat16,
+                       flipped_schedule=flipped)
 
-    from flashinfer.testing.utils import bench_gpu_time
-
-    profiler_buffer = torch.zeros((profiler_buffer_size,), dtype=torch.uint64, device="cuda")
-
-    # Measure kernel time with bench_gpu_time (warmup + L2 flush)
+    # Measure kernel time with bench_gpu_time (no profiler — profiler changes kernel binary)
+    wrapper = flashinfer.BatchAttention(kv_layout="NHD")
+    wrapper.plan(*plan_args, **plan_kwargs)
     measurements = bench_gpu_time(lambda: wrapper.run(q, kv_data))
     kernel_ms = float(np.median(measurements))
+    del wrapper; torch.cuda.empty_cache()
 
-    # Run once more with profiler buffer to get grid.sync() data
+    # Separate run with profiler to get grid.sync() data
+    wrapper_prof = flashinfer.BatchAttention(kv_layout="NHD")
+    wrapper_prof.plan(*plan_args, **plan_kwargs, use_profiler=True)
+    profiler_buffer = torch.zeros((profiler_buffer_size,), dtype=torch.uint64, device="cuda")
+    wrapper_prof.run(q, kv_data, profiler_buffer=profiler_buffer)  # warmup
     profiler_buffer.zero_()
-    wrapper.run(q, kv_data, profiler_buffer=profiler_buffer)
+    wrapper_prof.run(q, kv_data, profiler_buffer=profiler_buffer)
+    del wrapper_prof; torch.cuda.empty_cache()
 
     stats = extract_grid_sync_wait(profiler_buffer)
     stats["kernel_ms"] = kernel_ms
