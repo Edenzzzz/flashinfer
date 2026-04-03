@@ -114,8 +114,7 @@ struct PersistentParams {
   int32_t dyn_total_tiles;         // total tiles across all sequences (for bounds check)
   int32_t dyn_len_kv_chunk;        // KV chunk size limit for this task
   int32_t dyn_uniform_num_m_blocks; // >0 if all seqs have same num_m_blocks (fast O(1) lookup)
-  int32_t dyn_tile_stride;         // tile fetching stride (1=sequential LPT, >1=FA3-style strided)
-  IdType* dyn_scalars;             // [5] GPU buffer: {num_seqs, total_tiles, len_kv_chunk, uniform_num_m_blocks, tile_stride}
+  IdType* dyn_scalars;             // [4] GPU buffer: {num_seqs, total_tiles, len_kv_chunk, uniform_num_m_blocks}
                                    // When non-null (CUDA graph mode), kernel reads from this instead of frozen scalars
 
   uint32_t num_kv_heads;

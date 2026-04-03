@@ -1052,18 +1052,17 @@ struct HolisticPlanInfo {
     int32_t total_tiles;             // total tiles across all sequences
     int32_t len_kv_chunk;            // KV chunk size limit for this task
     int32_t uniform_num_m_blocks;    // >0 if all seqs have same num_m_blocks (fast O(1) lookup)
-    int32_t tile_stride;             // tile fetching stride (1=sequential LPT, >1=FA3-style strided)
   } dyn[NUM_TASKS];
   // Offset into int_buffer for per-task dynamic scheduler scalars:
-  // [num_seqs_0, total_tiles_0, len_kv_chunk_0, uniform_num_m_blocks_0, tile_stride_0,
-  //  num_seqs_1, total_tiles_1, len_kv_chunk_1, uniform_num_m_blocks_1, tile_stride_1]
+  // [num_seqs_0, total_tiles_0, len_kv_chunk_0, uniform_num_m_blocks_0,
+  //  num_seqs_1, total_tiles_1, len_kv_chunk_1, uniform_num_m_blocks_1]
   // When enable_cuda_graph, the kernel reads these from the buffer (updated per replay)
   // instead of from the frozen plan_info scalars.
   int64_t dyn_scalars_offset;
   bool enable_cuda_graph;
 
   static constexpr uint32_t NUM_TASK_ARGS = 10;
-  static constexpr uint32_t NUM_DYN_ARGS = 13;  // per-task dynamic scheduler args
+  static constexpr uint32_t NUM_DYN_ARGS = 12;  // per-task dynamic scheduler args
   static constexpr uint32_t NUM_SHARED_ARGS = 9 + NUM_TASKS + 1 + NUM_TASKS * NUM_DYN_ARGS + 3;  // +3 for dyn_scalars_offset, enable_cuda_graph, flipped_schedule (dup at end)
 
   std::vector<int64_t> ToVector() const {
@@ -1106,7 +1105,6 @@ struct HolisticPlanInfo {
       vec.push_back(dyn[i].total_tiles);
       vec.push_back(dyn[i].len_kv_chunk);
       vec.push_back(dyn[i].uniform_num_m_blocks);
-      vec.push_back(dyn[i].tile_stride);
     }
     vec.push_back(dyn_scalars_offset);
     vec.push_back(enable_cuda_graph);
@@ -1162,7 +1160,6 @@ struct HolisticPlanInfo {
       dyn[i].total_tiles = vec[dyn_base + i * NUM_DYN_ARGS + 9];
       dyn[i].len_kv_chunk = vec[dyn_base + i * NUM_DYN_ARGS + 10];
       dyn[i].uniform_num_m_blocks = vec[dyn_base + i * NUM_DYN_ARGS + 11];
-      dyn[i].tile_stride = vec[dyn_base + i * NUM_DYN_ARGS + 12];
     }
     uint32_t extra_base = dyn_base + NUM_TASKS * NUM_DYN_ARGS;
     dyn_scalars_offset = vec[extra_base + 0];
@@ -1415,12 +1412,6 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
       }
       plan_info.dyn[task].uniform_num_m_blocks =
           all_uniform ? (num_seqs > 0 ? dyn_num_m_blocks_vec[0] : 0) : 0;
-      {
-        // Read tile_stride from env var (for experimentation).
-        // 1 = sequential LPT (default), >1 = FA3-style strided.
-        const char* stride_env = std::getenv("FLASHINFER_LPT_TILE_STRIDE");
-        plan_info.dyn[task].tile_stride = stride_env ? std::atoi(stride_env) : 1;
-      }
 
       // Allocate and copy per-sequence metadata to device.
       // For CG, allocate for batch_size so offsets are invariant across replays.
@@ -1488,7 +1479,6 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
       plan_info.dyn[task].partial_o_offset_offset = 0;
       plan_info.dyn[task].num_kv_chunks_offset = 0;
       plan_info.dyn[task].uniform_num_m_blocks = 0;
-      plan_info.dyn[task].tile_stride = 1;
 
     std::vector<std::vector<IdType>> cluster_q_indptr(num_clusters, std::vector<IdType>()),
         cluster_kv_indptr(num_clusters, std::vector<IdType>()),
@@ -1676,11 +1666,11 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
   std::vector<IdType> tile_counter_init(NUM_TASKS, 0);
   CopyToPageLockedBuffer(page_locked_int_buffer, plan_info.tile_counter_offset, tile_counter_init);
 
-  // Allocate dynamic scheduler scalars buffer (5 ints per task):
-  // [num_seqs, total_tiles, len_kv_chunk, uniform_num_m_blocks, tile_stride] per task.
+  // Allocate dynamic scheduler scalars buffer (4 ints per task):
+  // [num_seqs, total_tiles, len_kv_chunk, uniform_num_m_blocks] per task.
   // When enable_cuda_graph, the kernel reads these from the buffer (updatable per replay)
   // instead of from frozen plan_info params.
-  constexpr int DYN_SCALARS_PER_TASK = 5;
+  constexpr int DYN_SCALARS_PER_TASK = 4;
   plan_info.dyn_scalars_offset = int_allocator.aligned_alloc_offset(
       sizeof(IdType) * NUM_TASKS * DYN_SCALARS_PER_TASK, 16, "dyn_scalars");
   plan_info.enable_cuda_graph = enable_cuda_graph;
@@ -1690,7 +1680,6 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
     dyn_scalars_vec[t * DYN_SCALARS_PER_TASK + 1] = plan_info.dyn[t].total_tiles;
     dyn_scalars_vec[t * DYN_SCALARS_PER_TASK + 2] = plan_info.dyn[t].len_kv_chunk;
     dyn_scalars_vec[t * DYN_SCALARS_PER_TASK + 3] = plan_info.dyn[t].uniform_num_m_blocks;
-    dyn_scalars_vec[t * DYN_SCALARS_PER_TASK + 4] = plan_info.dyn[t].tile_stride;
   }
   CopyToPageLockedBuffer(page_locked_int_buffer, plan_info.dyn_scalars_offset, dyn_scalars_vec);
 
