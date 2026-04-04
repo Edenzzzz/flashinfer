@@ -90,10 +90,12 @@ struct PersistentParams {
   IdType* kv_head_idx_arr;
   IdType* work_indptr;
   IdType* len_kv_chunk;
+  uint32_t* barrier_idx;
 
   // for state reduction
   IdType* merge_indptr;
   IdType* merge_o_indices;
+  uint32_t* merged_barrier_idx;
   IdType* num_packed_qo_len;
 
   // LPT runtime tile fetching (v1/v2 static approach)
@@ -133,6 +135,9 @@ struct PersistentParams {
   float sm_scale;
   float logits_soft_cap;
   float v_scale;
+
+  uint32_t* barrier_vec;
+  uint32_t* dyn_barrier_base;
   {{ additional_params_decl }}
 
   PROFILER_PARAMS_DECL

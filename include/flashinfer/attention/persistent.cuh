@@ -29,6 +29,37 @@ namespace flashinfer {
 using cp_async::PrefetchMode;
 using cp_async::SharedMemFillMode;
 
+/*!
+ * \brief In-memory barriers for per-output-row synchronization between
+ *        split-KV attention tiles and the reduction runner.
+ */
+struct GmemBarrier {
+  uint32_t* const semaphore_ptr;
+  __device__ __forceinline__ GmemBarrier(uint32_t* semaphore_ptr) : semaphore_ptr(semaphore_ptr) {}
+
+  __device__ __forceinline__ void commit(uint32_t off, bool predicate) {
+    if (predicate) {
+      uint32_t old;
+      asm volatile("atom.global.release.gpu.dec.u32 %0, [%1], 0xFFFFFFFF;"
+                   : "=r"(old)
+                   : "l"(semaphore_ptr + off));
+    }
+  }
+
+  __device__ __forceinline__ void wait(uint32_t off, bool predicate) {
+    if (predicate) {
+      auto ld_acquire_gpu = [](uint32_t* ptr) -> uint32_t {
+        uint32_t ans;
+        asm volatile("ld.acquire.gpu.global.u32 %0, [%1];" : "=r"(ans) : "l"(ptr) : "memory");
+        return ans;
+      };
+      while (ld_acquire_gpu(semaphore_ptr + off) != 0) {
+        __nanosleep(500);
+      }
+    }
+  }
+};
+
 template <typename Params>
 __device__ __forceinline__ auto get_block_coord(const Params& params, const uint32_t work_idx) {
   return std::tuple(params.q_indptr[work_idx], params.kv_indptr[work_idx],
@@ -454,6 +485,7 @@ struct BlockBatchPagedAttentionPersistent {
     smem_t<SWIZZLE_MODE_Q> q_smem(smem_storage->q_smem);
 
     AttentionVariant variant(params, /*batch_idx=*/0, nullptr);
+    GmemBarrier barriers(params.barrier_vec);
 
     const uint32_t lane_idx = threadIdx.x % 32;
     const uint32_t warp_idx = threadIdx.x / 32;
@@ -738,6 +770,16 @@ struct BlockBatchPagedAttentionPersistent {
         }
       }
 
+      // Signal barrier for split-KV reduction synchronization
+      if (num_kv_chunks > 1) {
+        if (use_dynamic) {
+          barriers.commit(params.dyn_barrier_base[dyn_bidb] + kv_head_idx, threadIdx.x == 0);
+        } else {
+          barriers.commit(params.barrier_idx[work_idx], threadIdx.x == 0);
+        }
+        __syncthreads();
+      }
+
       // profile
       if constexpr (CTA_TILE_Q > 64) {
         PROFILER_EVENT_END(profiler_closure, PersistentProfileEventType::kRunner1);
@@ -790,7 +832,8 @@ struct BlockBatchReductionPersistent {
       float* __restrict__ S, float* __restrict__ s_merged,
       const typename KTraits::IdType num_packed_qo_len, const uint_fastdiv gqa_group_size,
       const uint32_t num_kv_heads, const typename KTraits::IdType* indptr,
-      const typename KTraits::IdType* o_indices, uint8_t* smem PROFILER_CLOSURE_FUNC_PARAMS) {
+      const typename KTraits::IdType* o_indices, uint8_t* smem, uint32_t* barriers_vec,
+      uint32_t* merged_barriers_idx PROFILER_CLOSURE_FUNC_PARAMS) {
     __syncthreads();  // NOTE(Zihao): required for guarantee correctness on blackwell
     using DTypeIn = typename KTraits::DTypeIn;
     using DTypeO = typename KTraits::DTypeO;
@@ -817,22 +860,27 @@ struct BlockBatchReductionPersistent {
     float* s_smem = (float*)(smem + num_warps * num_smem_stages * bdy * head_dim * sizeof(DTypeIn) +
                              warp_idx * 32 * sizeof(float));
 
+    GmemBarrier barriers(barriers_vec);
+
     // V: [num_packed_qo_len x num_kv_tiles, num_kv_heads, head_dim]
     // v_merged: [qo_len, num_kv_heads, gqa_group_size, head_dim]
 #pragma unroll 1
     for (uint32_t i = worker_id; i < num_packed_qo_len * num_kv_heads; i += num_workers) {
-      __syncwarp();  // avoid data hazard due to reordering st.cast_store
-      PROFILER_EVENT_START(profiler_closure, PersistentProfileEventType::kReduction);
-      __syncwarp();  // avoid data hazard due to reordering st.cast_store
       // remap workload
       uint32_t packed_qo_idx = i / num_kv_heads;
       uint32_t kv_head_idx = i % num_kv_heads;
       const uint32_t num_index_sets = indptr[packed_qo_idx + 1] - indptr[packed_qo_idx];
       if (num_index_sets == 0 || num_index_sets == 1) {
         // already write through, bypass
-        PROFILER_EVENT_END(profiler_closure, PersistentProfileEventType::kReduction);
         continue;
       }
+
+      // Wait for all split-KV chunks to signal completion for this output row
+      barriers.wait(merged_barriers_idx[packed_qo_idx * num_kv_heads + kv_head_idx],
+                    (threadIdx.x % 32) == 0);
+      __syncwarp();
+
+      PROFILER_EVENT_START(profiler_closure, PersistentProfileEventType::kReduction);
 
       // index calculation
       auto partial_idx_to_offset = [&](uint32_t off) {
@@ -956,7 +1004,7 @@ cudaError_t BatchPagedAttentionPersistent(const Params params_1, const Params pa
   void* args[] = {(void*)&params_1, (void*)&params_2, (void*)&cta_counter};
 
   FLASHINFER_CUDA_CALL(
-      cudaLaunchCooperativeKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
+      cudaLaunchKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
   return cudaSuccess;
 }
 

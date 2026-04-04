@@ -148,6 +148,8 @@ void BatchPagedAttentionRun(TensorView float_workspace_buffer, TensorView int_wo
           params[i].work_indptr =
               GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.tasks[i].work_indptr_offset);
           params[i].len_kv_chunk = len_kv_chunk + i;
+          params[i].barrier_idx =
+              GetPtrFromBaseOffset<uint32_t>(int_buffer_ptr, plan_info.tasks[i].barrier_idx_offset);
 
           params[i].final_o = static_cast<DTypeO*>(o.data_ptr());
           params[i].final_lse =
@@ -162,6 +164,8 @@ void BatchPagedAttentionRun(TensorView float_workspace_buffer, TensorView int_wo
               GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.merge_indptr_offset);
           params[i].merge_o_indices =
               GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.merge_o_indices_offset);
+          params[i].merged_barrier_idx =
+              GetPtrFromBaseOffset<uint32_t>(int_buffer_ptr, plan_info.merged_barrier_idx_offset);
           params[i].num_packed_qo_len =
               GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.num_qo_len_offset);
 
@@ -181,6 +185,15 @@ void BatchPagedAttentionRun(TensorView float_workspace_buffer, TensorView int_wo
           params[i].sm_scale = sm_scale;
           params[i].v_scale = v_scale;
           params[i].logits_soft_cap = logits_soft_cap;
+
+          // Named barriers for per-output-row synchronization
+          {
+            uint32_t* barrier_vec =
+                GetPtrFromBaseOffset<uint32_t>(int_buffer_ptr, plan_info.barrier_vec_offset);
+            uint32_t* barrier_vec_copy =
+                GetPtrFromBaseOffset<uint32_t>(int_buffer_ptr, plan_info.barrier_vec_copy_offset);
+            params[i].barrier_vec = barrier_vec_copy;
+          }
 
           // LPT runtime tile fetching
           if (plan_info.flipped_schedule) {
@@ -222,6 +235,8 @@ void BatchPagedAttentionRun(TensorView float_workspace_buffer, TensorView int_wo
             params[i].dyn_total_tiles = plan_info.dyn[i].total_tiles;
             params[i].dyn_len_kv_chunk = plan_info.dyn[i].len_kv_chunk;
             params[i].dyn_uniform_num_m_blocks = plan_info.dyn[i].uniform_num_m_blocks;
+            params[i].dyn_barrier_base =
+                GetPtrFromBaseOffset<uint32_t>(int_buffer_ptr, plan_info.dyn[i].barrier_base_offset);
           } else {
             params[i].dyn_num_seqs = 0;
             params[i].dyn_qo_indptr = nullptr;
@@ -235,6 +250,7 @@ void BatchPagedAttentionRun(TensorView float_workspace_buffer, TensorView int_wo
             params[i].dyn_total_tiles = 0;
             params[i].dyn_len_kv_chunk = 0;
             params[i].dyn_uniform_num_m_blocks = 0;
+            params[i].dyn_barrier_base = nullptr;
           }
           // NOTE(Wenxuan) directly using the additional_params_decl from generate_additional_params
           // will be problematic because of the params[i]
@@ -247,6 +263,17 @@ void BatchPagedAttentionRun(TensorView float_workspace_buffer, TensorView int_wo
           IdType* tile_counters =
               GetPtrFromBaseOffset<IdType>(int_buffer_ptr, plan_info.tile_counter_offset);
           cudaMemsetAsync(tile_counters, 0, sizeof(IdType) * 2, stream);
+        }
+
+        // Reset barrier semaphores: copy initial counts from barrier_vec to barrier_vec_copy
+        if (plan_info.barrier_vec_size > 0) {
+          uint32_t* barrier_vec =
+              GetPtrFromBaseOffset<uint32_t>(int_buffer_ptr, plan_info.barrier_vec_offset);
+          uint32_t* barrier_vec_copy =
+              GetPtrFromBaseOffset<uint32_t>(int_buffer_ptr, plan_info.barrier_vec_copy_offset);
+          cudaMemcpyAsync(barrier_vec_copy, barrier_vec,
+                          sizeof(uint32_t) * plan_info.barrier_vec_size,
+                          cudaMemcpyDeviceToDevice, stream);
         }
 
         cudaError_t status =
