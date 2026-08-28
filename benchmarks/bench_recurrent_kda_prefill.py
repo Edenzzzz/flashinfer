@@ -23,9 +23,13 @@ The FlashInfer candidate is always invoked through the public
 device/shape policy, while ``nonpersistent`` supplies the same explicit
 workspace and packed sequence order used by the historical benchmark to keep
 B200 on the direct schedule family. ``--backend`` selects one public API
-backend per invocation; compare auto, CuTe DSL, and Cake with separate commands
-over the same case set. The resolved backend, schedule variant, and target are
-recorded during untimed warmup. With
+backend per invocation; compare auto, CuTe DSL, Cake, and VibeCUDA with
+separate commands over the same case set. ``--compare-to-sota`` instead
+measures ``backend="vibecuda"`` against the repository SOTA backend selected by
+``--sota-backend`` (default ``cake``) in one process over the same case set,
+checking output/final-state equality per workload and reporting per-workload
+latency plus arithmetic and geometric mean speedups. The resolved backend,
+schedule variant, and target are recorded during untimed warmup. With
 ``--flash-kda-peer``, two commit-verified MoonshotAI/FlashKDA measurements are
 reported:
 
@@ -43,6 +47,7 @@ build/JIT, and state-pool reset are outside the measured region.
 import argparse
 import json
 import subprocess
+import sys
 from dataclasses import dataclass
 from importlib import import_module
 from importlib.metadata import version
@@ -51,6 +56,14 @@ from typing import Callable, Optional
 
 import numpy as np
 import torch
+
+# This benchmark must measure the checkout it runs from. Prepend the repo
+# root so `flashinfer` resolves to this source tree even when the invoking
+# environment exposes another importable flashinfer (for example an editable
+# install of a different worktree); a no-op when already on sys.path.
+_REPO_ROOT = str(Path(__file__).resolve().parents[1])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from flashinfer.kda import recurrent_kda
 from flashinfer.kda_prefill import RecurrentKDAPrefillWorkspace
@@ -454,10 +467,13 @@ def _make_case(
     # harness while keeping route logging out of every timed call.
     kda_prefill_module = import_module("flashinfer.kda_prefill")
     kda_prefill_cute_module = import_module("flashinfer.kda_prefill_cute")
+    kda_vibecuda_module = import_module("flashinfer.kda_vibecuda")
     original_get_module = kda_prefill_module._get_flash_kda_prefill_module
     original_cute_run = kda_prefill_cute_module._run_cute_dsl_kda_prefill
+    original_get_vibecuda_module = kda_vibecuda_module._get_vibecuda_prefill_module
     resolved_cake_routes = []
     resolved_backends = []
+    resolved_vibecuda_routes = []
 
     def recording_get_module(variant, target):
         resolved_cake_routes.append((variant, target))
@@ -467,33 +483,78 @@ def _make_case(
         resolved_backends.append("cute-dsl")
         return original_cute_run(**kwargs)
 
+    vibecuda_run_variants = {
+        "run_m64": "m64",
+        "run_m128": "m128",
+        "run_m128_split": "m128_split",
+        "run_persistent_m128": "persistent",
+    }
+
+    def recording_get_vibecuda_module(target):
+        module = original_get_vibecuda_module(target)
+
+        class _RecordingModule:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def __getattr__(self, name):
+                attribute = getattr(self._inner, name)
+                variant = vibecuda_run_variants.get(name)
+                if variant is None:
+                    return attribute
+
+                def recorded_run(*run_args, **run_kwargs):
+                    resolved_vibecuda_routes.append((variant, target))
+                    return attribute(*run_args, **run_kwargs)
+
+                return recorded_run
+
+        return _RecordingModule(module)
+
     kda_prefill_module._get_flash_kda_prefill_module = recording_get_module
     kda_prefill_cute_module._run_cute_dsl_kda_prefill = recording_cute_run
+    kda_vibecuda_module._get_vibecuda_prefill_module = recording_get_vibecuda_module
     try:
         candidate_run()
         torch.cuda.synchronize()
     finally:
         kda_prefill_module._get_flash_kda_prefill_module = original_get_module
         kda_prefill_cute_module._run_cute_dsl_kda_prefill = original_cute_run
+        kda_vibecuda_module._get_vibecuda_prefill_module = original_get_vibecuda_module
         reset_state_pools()
     if resolved_backends:
-        if resolved_backends != ["cute-dsl"] or resolved_cake_routes:
+        if (
+            resolved_backends != ["cute-dsl"]
+            or resolved_cake_routes
+            or resolved_vibecuda_routes
+        ):
             raise RuntimeError(
                 "expected exactly one CuTe DSL route during warmup, got "
-                f"backends={resolved_backends}, cake={resolved_cake_routes}"
+                f"backends={resolved_backends}, cake={resolved_cake_routes}, "
+                f"vibecuda={resolved_vibecuda_routes}"
             )
         resolved_backend = "cute-dsl"
         decomp_ctas = len(case.seq_lens) * case.num_heads * 2
         sm_count = torch.cuda.get_device_properties(q.device).multi_processor_count
         resolved_variant = "decomp" if decomp_ctas <= sm_count else "engine"
         resolved_target = "bt16"
+    elif resolved_vibecuda_routes:
+        if len(resolved_vibecuda_routes) != 1 or resolved_cake_routes:
+            raise RuntimeError(
+                "expected exactly one VibeCUDA route during warmup, got "
+                f"vibecuda={resolved_vibecuda_routes}, "
+                f"cake={resolved_cake_routes}"
+            )
+        resolved_backend = "vibecuda"
+        resolved_variant, resolved_target = resolved_vibecuda_routes[0]
     elif len(resolved_cake_routes) == 1:
         resolved_backend = "cake"
         resolved_variant, resolved_target = resolved_cake_routes[0]
     else:
         raise RuntimeError(
             "expected one recurrent-KDA prefill route during warmup, got "
-            f"backends={resolved_backends}, cake={resolved_cake_routes}"
+            f"backends={resolved_backends}, cake={resolved_cake_routes}, "
+            f"vibecuda={resolved_vibecuda_routes}"
         )
 
     metadata = {
@@ -589,6 +650,202 @@ def _measure(
     return float(np.median(samples_ms)), samples_ms
 
 
+def _backend_case_set(case: Case) -> str:
+    if case in LEGACY_CASES:
+        return "legacy"
+    if case in H12_CASES:
+        return "h12"
+    if case in SMALL_BH_CASES:
+        return "small_bh"
+    raise ValueError(f"unclassified case: {case.name}")
+
+
+def _run_backend_comparison(
+    *,
+    selected_cases: tuple[Case, ...],
+    state_rotations_override: Optional[int],
+    sota_backend: str,
+    candidate_backend: str,
+    candidate_route: str,
+    warmup_ms: int,
+    bench_ms: int,
+    hardware: dict,
+) -> list[dict]:
+    """Measure the candidate backend against the SOTA backend in-process.
+
+    Both backends run the same deterministic inputs through the public
+    ``recurrent_kda`` API with the same timing policy (CUPTI, cold L2, no CUDA
+    graph, identical warmup/repeat windows) and the same rotating state-pool
+    contract. Each workload first checks candidate output/final-state equality
+    against the SOTA backend, then alternates SOTA/candidate/candidate/SOTA
+    blocks so each backend retains two independent block medians. Reports
+    per-workload latency and speedup plus arithmetic and geometric mean
+    speedups per case set and overall.
+    """
+
+    results = []
+    speedups_by_set: dict[str, list[float]] = {
+        "legacy": [],
+        "h12": [],
+        "small_bh": [],
+    }
+    print(
+        f"{'workload':<22} {'sota(' + sota_backend + ')':>18} "
+        f"{candidate_backend:>12} {'speedup':>9}  routes"
+    )
+    for case in selected_cases:
+        state_rotations = state_rotations_override
+        if state_rotations is None:
+            state_rotations = (
+                DEFAULT_H12_STATE_ROTATIONS
+                if case in H12_CASES
+                else DEFAULT_LEGACY_STATE_ROTATIONS
+            )
+        prepared_pair = {}
+        for backend in (sota_backend, candidate_backend):
+            prepared = _make_case(
+                case,
+                state_rotations=state_rotations,
+                candidate_route=candidate_route,
+                candidate_backend=backend,
+                flash_kda=None,
+            )
+            prepared.reset_state_pools()
+            prepared.candidate_run()
+            torch.cuda.synchronize()
+            prepared_pair[backend] = prepared
+        sota_prepared = prepared_pair[sota_backend]
+        candidate_prepared = prepared_pair[candidate_backend]
+
+        # Same deterministic inputs, so the SOTA post-call state slot and
+        # output are the reference for the candidate's own pool/output.
+        torch.testing.assert_close(
+            candidate_prepared.candidate_output,
+            sota_prepared.candidate_output,
+            atol=1e-2,
+            rtol=1e-2,
+        )
+        torch.testing.assert_close(
+            candidate_prepared.candidate_state_pool[0],
+            sota_prepared.candidate_state_pool[0],
+            atol=1e-2,
+            rtol=1e-2,
+        )
+        correctness = {
+            "correctness_sota": "passed",
+            "output_max_abs": float(
+                (
+                    candidate_prepared.candidate_output.float()
+                    - sota_prepared.candidate_output.float()
+                )
+                .abs()
+                .max()
+            ),
+            "state_max_abs": float(
+                (
+                    candidate_prepared.candidate_state_pool[0].float()
+                    - sota_prepared.candidate_state_pool[0].float()
+                )
+                .abs()
+                .max()
+            ),
+        }
+
+        block_medians = {sota_backend: [], candidate_backend: []}
+        samples = {sota_backend: [], candidate_backend: []}
+        for backend in (
+            sota_backend,
+            candidate_backend,
+            candidate_backend,
+            sota_backend,
+        ):
+            prepared_pair[backend].reset_state_pools()
+            torch.cuda.synchronize()
+            median, block_samples = _measure(
+                prepared_pair[backend].candidate_run,
+                warmup_ms=warmup_ms,
+                bench_ms=bench_ms,
+            )
+            block_medians[backend].append(median)
+            samples[backend].extend(block_samples)
+
+        sota_ms = float(np.median(block_medians[sota_backend]))
+        candidate_ms = float(np.median(block_medians[candidate_backend]))
+        speedup = sota_ms / candidate_ms
+        speedups_by_set[_backend_case_set(case)].append(speedup)
+
+        result = {
+            **candidate_prepared.metadata,
+            "sota_backend": sota_backend,
+            "sota_resolved_backend": sota_prepared.metadata["resolved_backend"],
+            "sota_variant": sota_prepared.metadata["variant"],
+            "sota_median_ms": sota_ms,
+            "sota_samples_ms": samples[sota_backend],
+            "sota_block_medians_ms": block_medians[sota_backend],
+            "candidate_backend": candidate_backend,
+            "median_ms": candidate_ms,
+            "median_us": candidate_ms * 1000.0,
+            "samples_ms": samples[candidate_backend],
+            "block_medians_ms": block_medians[candidate_backend],
+            "speedup_vs_sota": speedup,
+            "timing_backend": "cupti",
+            "cold_l2": True,
+            "cuda_graph": False,
+            "warmup_ms": warmup_ms,
+            "bench_ms": bench_ms,
+            "hardware": hardware,
+            **correctness,
+        }
+        results.append(result)
+        print(
+            f"{case.name:<22} {sota_ms * 1000.0:>15.3f}us "
+            f"{candidate_ms * 1000.0:>9.3f}us {speedup:>8.4f}x  "
+            f"{sota_backend}:{result['sota_variant']} -> "
+            f"{candidate_backend}:{result['variant']}"
+        )
+        del prepared_pair
+        torch.cuda.empty_cache()
+
+    all_speedups = [value for values in speedups_by_set.values() for value in values]
+
+    def _aggregate(values: list[float]) -> dict:
+        return {
+            "workloads": len(values),
+            "arithmetic_mean_speedup": float(np.mean(values)),
+            "geometric_mean_speedup": float(
+                np.exp(np.mean(np.log(np.asarray(values))))
+            ),
+        }
+
+    aggregate = {
+        "aggregate_speedups_vs_sota": {
+            **{
+                f"{name}_cases": _aggregate(values)
+                for name, values in speedups_by_set.items()
+                if values
+            },
+            "all_cases": _aggregate(all_speedups),
+        }
+    }
+    for name, values in speedups_by_set.items():
+        if values:
+            summary = _aggregate(values)
+            print(
+                f"{name} cases ({summary['workloads']} workloads): "
+                f"arithmetic mean {summary['arithmetic_mean_speedup']:.4f}x, "
+                f"geometric mean {summary['geometric_mean_speedup']:.4f}x"
+            )
+    if all_speedups:
+        summary = _aggregate(all_speedups)
+        print(
+            f"all cases ({summary['workloads']} workloads): "
+            f"arithmetic mean {summary['arithmetic_mean_speedup']:.4f}x, "
+            f"geometric mean {summary['geometric_mean_speedup']:.4f}x"
+        )
+    results.append(aggregate)
+    return results
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--warmup-ms", type=int, default=20)
@@ -623,11 +880,31 @@ def main() -> None:
     )
     parser.add_argument(
         "--backend",
-        choices=("auto", "cute-dsl", "cake"),
+        choices=("auto", "cute-dsl", "cake", "vibecuda"),
         default="auto",
         help=(
             "Select one backend for this invocation of the public recurrent_kda "
             "API; run separate commands to compare backends."
+        ),
+    )
+    parser.add_argument(
+        "--compare-to-sota",
+        action="store_true",
+        help=(
+            "Measure backend='vibecuda' against the --sota-backend reference "
+            "in one process over the same workloads and timing policy; check "
+            "output/final-state equality per workload and report per-workload "
+            "latency plus arithmetic and geometric mean speedups. "
+            "Incompatible with --flash-kda-peer."
+        ),
+    )
+    parser.add_argument(
+        "--sota-backend",
+        choices=("auto", "cute-dsl", "cake"),
+        default="cake",
+        help=(
+            "Reference backend for --compare-to-sota; 'cake' is the frozen "
+            "CAKE SOTA baseline for recurrent-KDA prefill."
         ),
     )
     parser.add_argument(
@@ -662,6 +939,8 @@ def main() -> None:
         parser.error(
             "--flash-kda-peer and --flash-kda-source-dir must be provided together"
         )
+    if args.compare_to_sota and args.flash_kda_peer:
+        parser.error("--compare-to-sota cannot be combined with --flash-kda-peer")
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")
     device = torch.device("cuda")
@@ -705,6 +984,20 @@ def main() -> None:
         "h12": H12_CASES,
         "small_bh": SMALL_BH_CASES,
     }[args.case_set]
+    if args.compare_to_sota:
+        results = _run_backend_comparison(
+            selected_cases=selected_cases,
+            state_rotations_override=args.state_rotations,
+            sota_backend=args.sota_backend,
+            candidate_backend="vibecuda",
+            candidate_route=args.candidate_route,
+            warmup_ms=args.warmup_ms,
+            bench_ms=args.bench_ms,
+            hardware=hardware,
+        )
+        if args.json is not None:
+            args.json.write_text(json.dumps(results, indent=2) + "\n")
+        return
     results = []
     for case in selected_cases:
         state_rotations = args.state_rotations
