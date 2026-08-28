@@ -3,21 +3,11 @@
 
 This module mirrors, verbatim, the workload construction exposed by the task's
 public fixed-benchmark contract (``test_cases.py`` workload table, per-case
-``model_seed = 377300000 + case_index``, input dtypes/generator ordering,
-per-case ``get_init_inputs()`` constants) so the candidate leg and the pinned
-fast_impl baseline leg can construct byte-identical inputs in two clean
-processes and the aggregate can reject any missing, extra, reordered, or
-seed-mismatched row by fingerprint comparison.
-
-The fixed protocol these workloads are timed with lives in
-``bench_recurrent_kda_prefill_fixed_protocol.py``: warmup=5 and iters=10
-count-based CUPTI samples (``bench_gpu_time(dry_run_iters=5, repeat_iters=10,
-enable_cupti=True, cold_l2_cache=True, use_cuda_graph=False)``) with the
-MEDIAN as the per-shape latency (SKB/toolbox convention), eager execution,
-inputs built once per workload and reused across all warmup/timed calls
-(``output`` allocated by the caller, ``initial_state`` mutated in place by
-every call, matching the fixed benchmark's forward contract), and an
-independently owned persistent RecurrentKDAPrefillWorkspace per leg.
+``model_seed = 377300000 + case_index``, input dtypes/generator ordering, and
+per-case ``get_init_inputs()`` constants). The shared definitions are used by
+the untimed sentinel/full-write validation. Performance comparison belongs to
+``bench_recurrent_kda_prefill.py``, which measures the VibeCUDA and CAKE
+backends from the same checkout on identical inputs.
 """
 
 from __future__ import annotations

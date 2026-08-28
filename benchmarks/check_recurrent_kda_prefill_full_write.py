@@ -8,7 +8,7 @@ stale coordinate outside the validated region could all pass a numeric
 comparison if the reference made the same omission. For each of the 18 fixed
 workloads this check proves, without timing, that every location the
 benchmark's validation reads is initialized and fully overwritten by each
-timed leg (the ``vibecuda`` candidate and the pinned fast_impl baseline):
+backend (the ``vibecuda`` candidate and the merged ``cake`` baseline):
 
 * output tensor: pre-filled with NaN before each of two consecutive calls;
   after every call every element must be non-NaN (full-write proof for every
@@ -38,12 +38,10 @@ timed leg (the ``vibecuda`` candidate and the pinned fast_impl baseline):
 
 Run per leg:
 
-    # Candidate leg (this checkout's integrated backend):
-    python benchmarks/check_recurrent_kda_prefill_full_write.py \
-        --backend vibecuda --expect-import <this-checkout-root>
-    # Pinned fast_impl baseline leg (default public path at the pinned rev):
-    PYTHONPATH=<pinned-source> python benchmarks/check_recurrent_kda_prefill_full_write.py \
-        --expect-import <pinned-source>
+    PYTHONPATH=$PWD python benchmarks/check_recurrent_kda_prefill_full_write.py \
+        --backend vibecuda --expect-import "$PWD" --with-prefill-workspace
+    PYTHONPATH=$PWD python benchmarks/check_recurrent_kda_prefill_full_write.py \
+        --backend cake --expect-import "$PWD" --with-prefill-workspace
 """
 
 from __future__ import annotations
